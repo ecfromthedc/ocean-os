@@ -5838,6 +5838,63 @@ async fn agent_turn(
     State(state): State<AppState>,
     Json(req): Json<AgentTurnRequest>,
 ) -> (StatusCode, Json<AgentTurnResponse>) {
+    // Admission must not live in the request future (daemon-freeze / lost-wake
+    // fix). Axum drops a handler future the moment the client disconnects, and
+    // everything in `agent_turn_admission` up to its `tokio::spawn` — cwd
+    // resolution, session hydration, project/git resolution, the Longhouse
+    // consult, request registration — used to run INSIDE this request future.
+    // With intake latency above a client's timeout (ocean-heartbeat's wake
+    // client formerly gave up at 30s while intake measured 32–55s), the
+    // disconnect landed while admission was parked at a pre-spawn await and the
+    // submitted turn silently evaporated: never registered, never run, no log.
+    //
+    // Running admission in its own task makes the turn's fate independent of
+    // the submitter's connection: a disconnect now loses only the ACK bytes,
+    // never the turn. The oneshot carries the exact response admission
+    // computed, so the HTTP contract (202/4xx/5xx bodies, backpressure 429) is
+    // byte-identical for connected clients.
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let ack = agent_turn_admission(state, req).await;
+        // Err = the submitter is gone (disconnect); the admitted turn keeps
+        // running regardless, and its lifecycle truth flows over the agent bus.
+        let _ = ack_tx.send(ack);
+    });
+    match ack_rx.await {
+        Ok(ack) => ack,
+        // The admission task died before sending (panic). Any turn that got as
+        // far as registration owns a TurnTerminalGuard, so lifecycle truth is
+        // already handled; the HTTP contract here is a plain failure body.
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(AgentTurnResponse {
+                ok: false,
+                turn_id: AgentTurnId::new_v4(),
+                session_id: AgentSessionId::new_v4(),
+                status: AgentTurnStatus::Failed,
+                event_id_prefix: String::new(),
+                error: Some("turn admission failed unexpectedly".to_string()),
+                output_tokens: None,
+                input_tokens: None,
+                cache_read_tokens: None,
+                tokens_per_second: None,
+                context_usage: None,
+                wall_ms: None,
+            }),
+        ),
+    }
+}
+
+/// The full turn-admission pipeline behind `POST /v1/agent/turns`: validation,
+/// backpressure, session/workspace binding, model + agent resolution, request
+/// registration, spawning the detached turn, and the fire-and-ack response.
+/// Runs on its OWN task (spawned by [`agent_turn`]), never inside the axum
+/// request future, so a client disconnect can no longer cancel a turn that the
+/// daemon has started admitting.
+async fn agent_turn_admission(
+    state: AppState,
+    req: AgentTurnRequest,
+) -> (StatusCode, Json<AgentTurnResponse>) {
     let AgentTurnRequest {
         session_id,
         prompt,
@@ -6020,12 +6077,22 @@ async fn agent_turn(
     let session_model: Option<String> = if is_new_session {
         None
     } else {
-        state
-            .runtime
-            .session_detail(core_sid(session_id))
-            .ok()
-            .map(|detail| detail.model)
-            .filter(|m| !m.trim().is_empty() && *m != global_model)
+        // `session_detail` reads and fully deserializes the persisted session
+        // JSON (every duplicate-bucket candidate) — real disk + serde work that
+        // scales with transcript size. Run it on the blocking pool so a resumed
+        // turn's admission never pins a runtime worker thread; under concurrent
+        // wakes those pinned workers were a measured source of intake latency
+        // and listener accept-starvation. Fail-soft on a join error exactly
+        // like a read error: no session pin.
+        let runtime = state.runtime.clone();
+        let sid = core_sid(session_id);
+        tokio::task::spawn_blocking(move || {
+            runtime.session_detail(sid).ok().map(|detail| detail.model)
+        })
+        .await
+        .ok()
+        .flatten()
+        .filter(|m| !m.trim().is_empty() && *m != global_model)
     };
 
     // Approval policy is daemon-owned and captured at turn start. The default
@@ -6132,7 +6199,22 @@ async fn agent_turn(
             );
         }
     };
-    let lifecycle_project_id = match resolved_lifecycle_project_id(&state, project_id, &cwd) {
+    // Project/workspace resolution spawns `git rev-parse` subprocesses
+    // (blocking `Command::output` in `session::workspace_root` /
+    // `owning_project_for_root`) and canonicalizes every registered project
+    // root — synchronous work that used to pin a runtime worker for its whole
+    // duration. Run it on the blocking pool; a join failure degrades to the
+    // same rejection as a resolution failure.
+    let lifecycle_project_id = {
+        let admission_state = state.clone();
+        let workspace = cwd.clone();
+        tokio::task::spawn_blocking(move || {
+            resolved_lifecycle_project_id(&admission_state, project_id, &workspace)
+        })
+        .await
+        .unwrap_or_else(|join_error| Err(format!("project resolution task failed: {join_error}")))
+    };
+    let lifecycle_project_id = match lifecycle_project_id {
         Ok(project_id) => project_id,
         Err(error) => {
             return (
@@ -7448,14 +7530,32 @@ async fn agent_sessions(
     // Bounded + paginated (OCEAN-250): page the session list rather than mapping
     // every historical session into the response on each poll. `next_cursor`/
     // `has_more` are additive; the `sessions` array shape is unchanged.
-    let page = state
-        .runtime
-        .list_sessions_page(scope.as_deref(), q.cursor.as_deref(), q.limit)
-        .unwrap_or_else(|_| ocean_agent::Page {
+    //
+    // The listing itself (`session::list`) still READS AND FULLY PARSES every
+    // session file in the archive before paginating — seconds of synchronous
+    // disk + serde work on a fleet-sized archive, and dashboards poll this
+    // endpoint continuously. Run it on the blocking pool so each poll stops
+    // pinning a runtime worker; that pinning was a measured contributor to
+    // turn-intake latency and listener accept-starvation under load. (The real
+    // fix — a summary index instead of a full-parse-per-poll — is tracked in
+    // DIAGNOSIS.md.)
+    let page = {
+        let runtime = state.runtime.clone();
+        let scope = scope.clone();
+        let cursor = q.cursor.clone();
+        let limit = q.limit;
+        tokio::task::spawn_blocking(move || {
+            runtime.list_sessions_page(scope.as_deref(), cursor.as_deref(), limit)
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_else(|| ocean_agent::Page {
             items: Vec::new(),
             next_cursor: None,
             has_more: false,
-        });
+        })
+    };
     // Snapshot the live request registry once, then derive each summary's
     // active_turn from it via the same helper the detail endpoint uses
     // (OCEAN-205). This is a cheap status peek — no per-session transcript load.
@@ -14225,6 +14325,66 @@ mod tests {
             "second turn's permit was never released (detached-task leak?)"
         );
     }
+    /// Daemon-freeze / lost-wake regression: a client disconnect drops the axum
+    /// request future, and admission used to live inside it — a drop landing at
+    /// any pre-spawn await (the Longhouse consult, request registration)
+    /// silently cancelled the submitted turn. Admission is now detached onto its
+    /// own task, so dropping the handler future (exactly what axum does when
+    /// ocean-heartbeat's wake client times out mid-intake) must leave the turn
+    /// running to completion.
+    ///
+    /// The handler future is polled once (timeout(0) guarantees at least one
+    /// poll — enough to reach the detach spawn) and then DROPPED. The turn must
+    /// still run: lifecycle retains a TurnFinished and the permit returns.
+    #[tokio::test]
+    async fn agent_turn_survives_request_future_drop() {
+        use ocean_agent_sdk::extension_lifecycle::LifecycleEventKind;
+        use std::time::Duration;
+
+        let state = capped_turn_state(1);
+
+        // Simulated client disconnect: poll the handler future briefly, drop it.
+        let dropped_mid_flight = tokio::time::timeout(
+            Duration::from_millis(1),
+            agent_turn(State(state.clone()), Json(sample_agent_turn())),
+        )
+        .await
+        .is_err();
+        // (If the whole intake happened to finish inside 1ms the turn was ACKed
+        // normally and the assertion below still holds — but on the fake-ok
+        // runtime the pre-spawn Longhouse consult makes mid-flight the norm.)
+        let _ = dropped_mid_flight;
+
+        // The submitted turn must be admitted and run to completion anyway.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let retained = state.extension_lifecycle.attach().retained;
+                if retained
+                    .iter()
+                    .any(|event| event.kind == LifecycleEventKind::TurnFinished)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect(
+            "turn submitted by a disconnected client never ran — admission was \
+             cancelled with the request future",
+        );
+
+        // And its permit came back: nothing leaked with the dropped future.
+        let released = tokio::time::timeout(Duration::from_secs(2), async {
+            while state.turn_limiter.available_permits() != 1 {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .is_ok();
+        assert!(released, "disconnected turn's permit was never released");
+    }
+
     /// fire-and-ack (OCEAN-410): the POST returns 202 the instant a turn is
     /// accepted — `ok: true`, `status: Running`, and NO telemetry (wall_ms /
     /// output_tokens are `None`) — because the turn hasn't run yet at ACK time.
