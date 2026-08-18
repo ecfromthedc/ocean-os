@@ -210,6 +210,30 @@ const WAKE_DELIVERED: i32 = 0;
 const WAKE_FAILED: i32 = 1;
 const WAKE_DEFERRED: i32 = 3;
 
+/// Default deadline for the wake HTTP client (health probe, model preflight and
+/// the turn POST's 202 ACK). Must comfortably exceed the daemon's worst
+/// observed intake latency — a client timeout shorter than the ACK both fails
+/// the wake AND can cancel the turn it just submitted (the daemon's pre-spawn
+/// admission runs inside the request future).
+const DEFAULT_ACK_TIMEOUT_SECS: u64 = 300;
+
+/// Env var overriding [`DEFAULT_ACK_TIMEOUT_SECS`], in seconds.
+const ACK_TIMEOUT_ENV: &str = "OCEAN_HEARTBEAT_TIMEOUT_SECS";
+
+/// The wake client's request timeout: `OCEAN_HEARTBEAT_TIMEOUT_SECS` when set
+/// to a positive integer, else the 300s default. Unparseable / zero values fall
+/// back to the default (a zero timeout would fail every wake instantly).
+fn ack_timeout() -> Duration {
+    Duration::from_secs(ack_timeout_secs_from(std::env::var(ACK_TIMEOUT_ENV).ok()))
+}
+
+fn ack_timeout_secs_from(raw: Option<String>) -> u64 {
+    raw.as_deref()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(DEFAULT_ACK_TIMEOUT_SECS)
+}
+
 struct WakeArgs {
     session_id: Option<String>,
     session_file: Option<PathBuf>,
@@ -258,11 +282,18 @@ async fn wake_once(daemon_url: &str, args: WakeArgs) -> Result<i32> {
         return Ok(WAKE_FAILED);
     }
 
-    // The POST is fire-and-ack (202 + status Running), so the HTTP client only
-    // needs a short request timeout; turn completion is awaited separately on
-    // the SSE stream below.
+    // The POST is fire-and-ack (202 + status Running) and turn completion is
+    // awaited separately on the SSE stream below — but the ACK itself is NOT
+    // fast on a loaded daemon: intake currently does synchronous session
+    // hydration / project resolution before responding, and measured ACK
+    // latency reaches 32–55s. A 30s client timeout therefore made every
+    // automated wake race the daemon's own intake: reqwest disconnected first,
+    // and a disconnect that lands while the handler is parked at a pre-spawn
+    // await silently cancels the turn (the request future is dropped before
+    // `tokio::spawn`). Default to a generous 300s and let operators override
+    // via OCEAN_HEARTBEAT_TIMEOUT_SECS.
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
+        .timeout(ack_timeout())
         .build()?;
     let base = daemon_url.trim_end_matches('/');
     let health = format!("{base}/health");
@@ -666,4 +697,77 @@ fn launchd_plist(
         stdout,
         stderr
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The wake client's ACK deadline must default to 300s (comfortably above
+    /// the daemon's worst measured intake latency), honor a positive
+    /// OCEAN_HEARTBEAT_TIMEOUT_SECS override, and degrade unparseable / zero
+    /// values back to the default rather than to a wake-killing tiny timeout.
+    /// Driven through the pure `ack_timeout_secs_from` seam so the test never
+    /// mutates process-global env.
+    #[test]
+    fn ack_timeout_defaults_overrides_and_rejects_garbage() {
+        assert_eq!(ack_timeout_secs_from(None), DEFAULT_ACK_TIMEOUT_SECS);
+        assert_eq!(ack_timeout_secs_from(Some("600".into())), 600);
+        assert_eq!(ack_timeout_secs_from(Some(" 45 ".into())), 45);
+        assert_eq!(
+            ack_timeout_secs_from(Some("0".into())),
+            DEFAULT_ACK_TIMEOUT_SECS,
+            "zero would fail every wake instantly; must fall back"
+        );
+        assert_eq!(
+            ack_timeout_secs_from(Some("soon".into())),
+            DEFAULT_ACK_TIMEOUT_SECS
+        );
+        assert_eq!(
+            ack_timeout_secs_from(Some(String::new())),
+            DEFAULT_ACK_TIMEOUT_SECS
+        );
+    }
+
+
+
+
+
+
+
+    #[test]
+    fn nearest_model_suggests_close_match() {
+        let candidates = &["k3", "deepseek-v4-pro", "gpt-5.6-sol"];
+        assert_eq!(nearest_model("kimi-k3", candidates), Some("k3"));
+    }
+
+    #[test]
+    fn nearest_model_exact_match_found() {
+        let candidates = &["k3", "kimi-k3"];
+        assert_eq!(nearest_model("k3", candidates), Some("k3"));
+    }
+
+    #[test]
+    fn nearest_model_too_far_returns_none() {
+        let candidates = &["k3", "deepseek-v4-pro"];
+        assert_eq!(nearest_model("xyzzy-wizard-extreme", candidates), None);
+    }
+
+    #[test]
+    fn nearest_model_case_insensitive() {
+        let candidates = &["K3", "deepseek-v4-pro"];
+        assert_eq!(nearest_model("k3", candidates), Some("K3"));
+    }
+
+    #[test]
+    fn nearest_model_empty_candidates() {
+        let candidates: &[&str] = &[];
+        assert_eq!(nearest_model("k3", candidates), None);
+    }
+
+    #[test]
+    fn nearest_model_short_typo() {
+        let candidates = &["gpt-5.6-sol", "gpt-4o", "k3"];
+        assert_eq!(nearest_model("gpt-5.6-sol", candidates), Some("gpt-5.6-sol"));
+    }
 }
