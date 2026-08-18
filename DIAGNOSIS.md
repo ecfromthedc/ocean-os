@@ -263,6 +263,90 @@ mechanism 1, above).
 
 ---
 
+## Bug C — the Mini's every-real-turn freeze: PROVEN (2026-08-18)
+
+**Mechanism: `open(2)` under a macOS privacy-protected folder (`~/Documents`)
+blocks forever for the launchd-agent daemon — TCC consent never resolves —
+and the agent loop had NO deadline around tool execution, so the turn froze
+silently for good.** Bugs A/B above are real defects and their fixes stand,
+but they were not the Mini's per-turn freeze; this is, and it reproduces on
+every binary version because it is environmental.
+
+### Evidence chain (all on the Mini, patched binary `d518dde`)
+
+1. **The log pins the exact stop.** Both frozen real-canary turns (sessions
+   `7f941fdc` 03:20Z, `a951558a` 03:27Z) end at
+   `tool_exec{tool_name=read}: … new` — after the bash-tool `git log`
+   succeeded — then eternal silence. No close, no error, no checkpoint.
+2. **The sample pins the exact syscall.** `/tmp/frozen-real-turn-sample.txt`:
+   one blocking-pool thread inside the kernel in `__open`, called from
+   `tokio::fs::OpenOptions::std_open` instantiated in `ocean_runtime`
+   (the read tool's `fs::File::open`, `tools/read.rs` `read_capped`). Every
+   other thread idle-parked. `fs::metadata` on the same path had already
+   succeeded — the block gates *data* access, not stat.
+3. **Minimal bisect, same daemon, same minute.** A canary reading
+   `/tmp/probe-tmp.txt` completed (tool_exec close in 8.5ms, turn finished,
+   persisted); a canary reading
+   `~/Documents/Development/probe-docs.txt` — a plain 31-byte file created
+   seconds earlier over ssh — blocked in `open(2)` indefinitely (>1h
+   observed on the previous daemon boot).
+4. **The same file reads instantly from an ssh shell** (sshd carries its own
+   TCC grant). A freshly bootstrapped launchd agent running `cat` on the same
+   file blocked ~6s in `open()` and then failed with EINTR — the TCC consent
+   machinery resolving for a platform binary. For the unbundled ad-hoc
+   ocean-daemon binary, consent never resolves and the syscall never returns.
+5. **The pattern is fully explained.** Trivial canaries (echo/sleep) never
+   touch `~/Documents` → pass. Every *real* prompt on the Mini touches
+   `~/Documents/Development` (where its repos live) → freezes at the first
+   in-process fs op. The bash tool's `git -C ~/Documents/...` works because
+   the *subprocess* gets its own TCC attribution. Version-independent
+   (Jul-29 = Aug-14 = patched) because the trigger is environmental. The
+   laptop never freezes because its repos live under `~/dev` — unprotected.
+
+### Why one blocked open froze the whole turn forever
+
+The per-round `timeout_at(round_deadline, stream_work)`
+(`agent_loop.rs`) bounds ONLY the provider stream. Tool execution between
+rounds had **no deadline at all**, and a `tokio::fs` op runs on the blocking
+pool where no async cancellation can reach a thread parked in a syscall. So:
+silent freeze, session `running` forever, lease held, `updated_ms` frozen —
+exactly the fleet symptom.
+
+### Fix shipped
+
+`AgentTool::execute_timeout(&args) -> Option<Duration>` — a wall-clock bound
+per `execute()` call, enforced in the loop's `run_one`:
+
+- Generic default 600s (`OCEAN_TOOL_TIMEOUT_SECS` overrides); exists to turn
+  an eternal OS-level block into a visible error, not to police slow tools.
+- Local-fs tools (`read`, `ls`, `edit`, `write`, `hashline_edit`): 120s —
+  they take model-chosen paths straight into in-process `open(2)`.
+- `bash` and `component_wait`: caller-chosen `timeout_ms` + grace, so a
+  deliberately budgeted long command/wait is never cut.
+- `offshore_dispatch`: its configured remote turn timeout + grace.
+- `SpillingTool` forwards the wrapped tool's bound.
+- On elapse: WARN (`tool execution abandoned at its deadline`), an is_error
+  tool result telling the model why and not to retry the same args, and the
+  turn **continues**. The blocked blocking-pool thread leaks until the kernel
+  releases it — bounded cost, logged.
+- Regression: e2e `hung_tool_is_abandoned_at_deadline_and_turn_completes`
+  (freezes pre-fix), plus unit tests for the env parse seam and the bash /
+  read overrides.
+
+### Operational remedy for the Mini (config, not code — for Eric)
+
+The daemon still cannot *read* `~/Documents` in-process; the fix converts the
+freeze into a clean 120s tool error. To actually grant access, on the Mini's
+screen: System Settings → Privacy & Security → Full Disk Access → add the
+daemon binary. Two traps: (1) TCC identity is the *executed binary's path* —
+each deploy mints a new `ocean-daemon-prod-XXXX` name, so either grant the
+stable path the launcher execs or re-grant per deploy; (2) check the Mini's
+screen for an already-pending consent dialog. Alternative that needs no
+grant: keep seat repos out of `~/Documents`/`~/Desktop`/`~/Downloads` (the
+laptop's `~/dev` layout), or let agents use the bash tool for reads there.
+
+---
+
 ## What remains (recommended, not patched here)
 
 1. **`session::list` needs a summary index.** `spawn_blocking` stops the
