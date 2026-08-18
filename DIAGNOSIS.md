@@ -333,6 +333,29 @@ per `execute()` call, enforced in the loop's `run_one`:
   (freezes pre-fix), plus unit tests for the env parse seam and the bash /
   read overrides.
 
+### Deployment proof (Mini, binary `ocean-daemon-prod-51ad405`, 2026-08-18)
+
+Deployed to `~/.local/libexec/ocean-daemon/`, `current` repointed, kickstarted.
+
+- Real canary #1 (`/tmp/canary-real.json`, the prompt that froze every prior
+  binary): read hit the 120s deadline → WARN `tool execution abandoned at its
+  deadline` → error result → checkpoints resumed → model recovered and
+  reported honestly. **`agent turn finished ok=true wall_ms=267657`.**
+- Real canary #2 (same payload, fresh session): **`ok=true wall_ms=235802`**
+  — reproducible.
+- Real canary #3, identical workflow against the same repo cloned at
+  `~/dev/artist-dashboard-template` (unprotected path): full end-to-end
+  success — git log + read tool + genuine 2-sentence README summary —
+  **`ok=true wall_ms=15708`**. The only residual limitation is the
+  environmental TCC gate on `~/Documents`, now a clean visible error instead
+  of a freeze.
+
+One more data point from canary #1: on this boot even the bash tool's
+subprocesses got `EINTR` ("Interrupted system call") touching `~/Documents`
+— child attribution varies per boot (the earlier boot's `git -C ~/Documents`
+succeeded). Nothing version-dependent: only the *in-process* `open(2)` ever
+blocks forever; children resolve (allow or EINTR) within seconds.
+
 ### Operational remedy for the Mini (config, not code — for Eric)
 
 The daemon still cannot *read* `~/Documents` in-process; the fix converts the
