@@ -538,6 +538,12 @@ impl AgentTool for SpillingTool {
     fn requires_permission(&self) -> bool {
         self.inner.requires_permission()
     }
+    /// Forward the wrapped tool's deadline — the decorator adds only in-memory
+    /// post-processing, so the inner tool's bound (e.g. `read`'s tight local-fs
+    /// deadline, `bash`'s args-derived one) is the correct bound here too.
+    fn execute_timeout(&self, args: &Value) -> Option<std::time::Duration> {
+        self.inner.execute_timeout(args)
+    }
     async fn execute(&self, tool_call_id: &str, args: Value) -> Result<AgentToolResult, String> {
         // A `read artifact://<id>` is the model deliberately pulling spilled
         // content back. Re-spilling that output would be circular — it would

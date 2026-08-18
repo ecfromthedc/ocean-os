@@ -162,7 +162,52 @@ pub trait AgentTool: Send + Sync {
     fn concurrency(&self) -> Concurrency {
         Concurrency::Exclusive
     }
+    /// Wall-clock bound for ONE `execute()` call, resolved with the call's args
+    /// in hand. When it elapses the agent loop ABANDONS the call and hands the
+    /// model a timeout error instead — the turn continues rather than freezing.
+    ///
+    /// This is a safety net against operations that block forever inside the
+    /// OS, where no async-level cancellation can reach them: `open(2)` on a
+    /// macOS privacy-protected folder (TCC on ~/Documents/Desktop/Downloads
+    /// with no access grant never resolves for a launchd daemon — the proven
+    /// Mini production freeze), a dead network/FUSE mount, a FIFO with no peer.
+    /// The default is deliberately generous — it exists to convert an eternal
+    /// silent freeze into a visible error, not to police slow tools.
+    ///
+    /// `None` opts out entirely — only for tools that provably bound
+    /// themselves. Tools driven by a caller-supplied duration (e.g. `bash`'s
+    /// `timeout_ms`) override this to that duration plus grace.
+    fn execute_timeout(&self, _args: &Value) -> Option<std::time::Duration> {
+        Some(default_tool_timeout())
+    }
     async fn execute(&self, tool_call_id: &str, args: Value) -> Result<AgentToolResult, String>;
+}
+
+/// Default [`AgentTool::execute_timeout`] when a tool does not override it and
+/// `OCEAN_TOOL_TIMEOUT_SECS` is unset/invalid.
+pub const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 600;
+
+/// Tighter bound shared by the local-filesystem tools (`read`, `ls`, `edit`,
+/// `write`, `hashline_edit`): a local-disk open/stat/read/write that takes two
+/// minutes IS the wedge this timeout exists for, and these tools take
+/// model-chosen paths straight into in-process `open(2)` — the exact call the
+/// Mini freeze parked in forever.
+pub const LOCAL_FS_TOOL_TIMEOUT_SECS: u64 = 120;
+
+/// The process-wide default tool deadline: `OCEAN_TOOL_TIMEOUT_SECS` when set
+/// to a positive integer, else [`DEFAULT_TOOL_TIMEOUT_SECS`].
+pub fn default_tool_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(tool_timeout_secs_from(
+        std::env::var("OCEAN_TOOL_TIMEOUT_SECS").ok().as_deref(),
+    ))
+}
+
+/// Pure parse seam for the env override: positive integer seconds, anything
+/// else (unset, zero, garbage) falls back to the default.
+pub fn tool_timeout_secs_from(raw: Option<&str>) -> u64 {
+    raw.and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .unwrap_or(DEFAULT_TOOL_TIMEOUT_SECS)
 }
 
 pub fn tool_def(t: &dyn AgentTool) -> Tool {
@@ -466,6 +511,56 @@ mod tests {
 
     fn cfg() -> AgentConfig {
         AgentConfig::new(Model::anthropic_claude_sonnet_4_6(), "test")
+    }
+
+    /// `OCEAN_TOOL_TIMEOUT_SECS` parse seam: positive integers win, everything
+    /// else — unset, zero, negative, garbage — falls back to the default.
+    #[test]
+    fn tool_timeout_env_parse_contract() {
+        assert_eq!(tool_timeout_secs_from(None), DEFAULT_TOOL_TIMEOUT_SECS);
+        assert_eq!(tool_timeout_secs_from(Some("")), DEFAULT_TOOL_TIMEOUT_SECS);
+        assert_eq!(tool_timeout_secs_from(Some("0")), DEFAULT_TOOL_TIMEOUT_SECS);
+        assert_eq!(
+            tool_timeout_secs_from(Some("-5")),
+            DEFAULT_TOOL_TIMEOUT_SECS
+        );
+        assert_eq!(
+            tool_timeout_secs_from(Some("ten")),
+            DEFAULT_TOOL_TIMEOUT_SECS
+        );
+        assert_eq!(tool_timeout_secs_from(Some("45")), 45);
+        assert_eq!(tool_timeout_secs_from(Some(" 45 ")), 45, "whitespace trims");
+    }
+
+    /// The default execute deadline exists (tools are bounded unless they opt
+    /// out) and resolves from the env-independent default here.
+    #[test]
+    fn agent_tool_default_execute_timeout_is_bounded() {
+        struct Plain;
+        #[async_trait]
+        impl AgentTool for Plain {
+            fn name(&self) -> &str {
+                "plain"
+            }
+            fn description(&self) -> &str {
+                "plain"
+            }
+            fn parameters(&self) -> Value {
+                serde_json::json!({})
+            }
+            async fn execute(
+                &self,
+                _tool_call_id: &str,
+                _args: Value,
+            ) -> Result<AgentToolResult, String> {
+                Ok(AgentToolResult::text("ok"))
+            }
+        }
+        let t = Plain.execute_timeout(&Value::Null);
+        assert!(
+            t.is_some(),
+            "a tool that does not opt out must be deadline-bounded"
+        );
     }
 
     #[test]

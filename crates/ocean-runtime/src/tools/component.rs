@@ -362,6 +362,20 @@ impl AgentTool for ComponentWaitTool {
         })
     }
 
+    /// The wait legitimately runs for the caller-chosen `timeout_ms` (the same
+    /// value `execute` enforces on the interaction channel); track it plus
+    /// grace so the loop-level deadline never cuts a deliberate long wait.
+    fn execute_timeout(&self, args: &Value) -> Option<std::time::Duration> {
+        let timeout_ms = args
+            .get("timeout_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(60_000);
+        Some(
+            std::time::Duration::from_millis(timeout_ms)
+                .saturating_add(std::time::Duration::from_secs(30)),
+        )
+    }
+
     async fn execute(&self, _tool_call_id: &str, args: Value) -> Result<AgentToolResult, String> {
         // The session id is injected from SessionContext when the tool is built
         // (OCEAN-60). Only fall back to the model-supplied arg when no session

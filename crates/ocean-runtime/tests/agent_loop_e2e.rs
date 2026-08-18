@@ -1779,3 +1779,107 @@ async fn kimi_k3_final_synthesis_retains_history_declarations_with_tool_choice_n
     assert_eq!(final_context.dynamic_tool_declarations[0].before_message, 3);
     assert_eq!(final_context.tool_choice, ocean_protocol::ToolChoice::None);
 }
+
+// ===========================================================================
+// Scenario — a tool blocked forever inside the OS cannot freeze the turn.
+//
+// The production incident this guards (Mini fleet, Aug 2026): `read` of a file
+// under ~/Documents parked in `open(2)` forever — macOS TCC never resolved
+// consent for the launchd daemon — and the turn froze silently for good: no
+// log line, no state change, session lease held until restart. The round
+// deadline only bounds the PROVIDER stream, so tool execution needs its own
+// bound ([`AgentTool::execute_timeout`], enforced in `run_one`). Pre-fix this
+// test hangs at the outer harness timeout.
+// ===========================================================================
+
+/// A tool whose `execute` never completes — models an operation blocked in a
+/// syscall that no async-level cancellation can reach.
+struct StuckTool;
+
+#[async_trait]
+impl AgentTool for StuckTool {
+    fn name(&self) -> &str {
+        "stuck"
+    }
+    fn description(&self) -> &str {
+        "never returns"
+    }
+    fn parameters(&self) -> Value {
+        serde_json::json!({ "type": "object", "properties": {} })
+    }
+    fn requires_permission(&self) -> bool {
+        false
+    }
+    /// Tight deadline so the test proves the abandon path in milliseconds.
+    fn execute_timeout(&self, _args: &Value) -> Option<std::time::Duration> {
+        Some(std::time::Duration::from_millis(100))
+    }
+    async fn execute(&self, _id: &str, _args: Value) -> Result<AgentToolResult, String> {
+        std::future::pending::<()>().await;
+        unreachable!("pending() never resolves")
+    }
+}
+
+#[tokio::test]
+async fn hung_tool_is_abandoned_at_deadline_and_turn_completes() {
+    let provider = Arc::new(MockProvider::new(vec![
+        // Round 1: the model calls the stuck tool.
+        vec![done(
+            vec![tool_call("call-stuck", "stuck", serde_json::json!({}))],
+            StopReason::ToolUse,
+        )],
+        // Round 2: the model recovers after seeing the timeout error.
+        vec![done(vec![Content::text("recovered")], StopReason::Stop)],
+    ]));
+
+    let cfg = base_config(provider.clone()).with_tools(vec![Arc::new(StuckTool)]);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    // The whole point: the run COMPLETES. Pre-fix it never returns — the outer
+    // timeout here is the regression tripwire, generous enough to never flake.
+    let run = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        ocean_runtime::run_agent(&cfg, user("call the stuck tool"), Some(tx)),
+    )
+    .await
+    .expect("REGRESSION: a hung tool froze the turn — no deadline around tool execution")
+    .expect("turn must complete cleanly after abandoning the hung tool");
+
+    // Both rounds ran: the loop continued past the hung tool.
+    assert_eq!(provider.call_count(), 2);
+    // Transcript stays provider-valid: the abandoned call has a paired result.
+    assert_no_orphan_tool_use(&run.messages);
+
+    // The paired result is a flagged error naming the deadline, so the model
+    // knows the call was abandoned (and does not believe it succeeded).
+    let tr = run
+        .messages
+        .iter()
+        .find_map(|m| match m {
+            Message::ToolResult(tr) if tr.tool_call_id == "call-stuck" => Some(tr),
+            _ => None,
+        })
+        .expect("a tool result paired to the abandoned call");
+    assert!(tr.is_error, "abandoned tool call must surface as an error");
+    let text = tr
+        .content
+        .iter()
+        .find_map(|c| c.as_text())
+        .expect("timeout result carries text");
+    assert!(
+        text.contains("exceeded its") && text.contains("deadline"),
+        "timeout result must say the deadline elapsed, got: {text}"
+    );
+
+    // The event stream carried an is_error ToolExecutionEnd for the call, so
+    // live clients see the abandon too.
+    let events = collect_events(&mut rx);
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ToolExecutionEnd { tool_name, is_error, .. }
+                if tool_name == "stuck" && *is_error
+        )),
+        "expected an is_error ToolExecutionEnd for the abandoned call"
+    );
+}

@@ -29,6 +29,16 @@ impl EditTool {
 
 #[async_trait]
 impl AgentTool for EditTool {
+    /// Local-disk I/O with a model-chosen path goes straight into in-process
+    /// `open(2)`/`read(2)`/`write(2)` — the calls a privacy-gated (macOS TCC)
+    /// or dead-mount path blocks forever, freezing the turn (the proven Mini
+    /// production freeze). Bound tighter than the generic default: a local fs
+    /// op that takes two minutes IS the wedge this deadline exists for.
+    fn execute_timeout(&self, _args: &Value) -> Option<std::time::Duration> {
+        Some(std::time::Duration::from_secs(
+            crate::types::LOCAL_FS_TOOL_TIMEOUT_SECS,
+        ))
+    }
     fn name(&self) -> &str {
         "edit"
     }

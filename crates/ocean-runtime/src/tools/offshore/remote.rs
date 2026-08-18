@@ -62,6 +62,16 @@ impl AgentTool for OffshoreDispatchTool {
     fn name(&self) -> &str {
         "offshore_dispatch"
     }
+    /// Dispatch legitimately runs for the whole configured offshore turn
+    /// timeout (its HTTP call is bounded by exactly that), which may exceed the
+    /// generic loop default. Track it, plus grace, so the loop-level abandon
+    /// never fires on a healthy long remote turn.
+    fn execute_timeout(&self, _args: &Value) -> Option<Duration> {
+        Some(
+            Duration::from_secs(self.ctx.cfg.turn_timeout_secs)
+                .saturating_add(Duration::from_secs(60)),
+        )
+    }
     fn description(&self) -> &str {
         "Run one agent turn on the offshore Ocean daemon, in a remote working directory. SYNCHRONOUS: the call returns only when the turn finishes, which can take many minutes (bounded by the configured offshore turn timeout) — watch progress with offshore_events from another turn if needed. Only pass a cwd that offshore_workspace returned; the remote daemon does NOT validate cwd. Keep one session per job: omit session_id on the job's first dispatch (the daemon mints one — note it from the result) and reuse it on every follow-up/steering dispatch. The remote agent's work leaves the box only via git, so the prompt MUST tell it to COMMIT its work — offshore_ship/offshore_fetch move committed work only."
     }
