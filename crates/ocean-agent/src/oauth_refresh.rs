@@ -81,15 +81,47 @@ fn state() -> &'static tokio::sync::Mutex<RefreshState> {
     })
 }
 
+/// Belt-and-braces outer deadline on one token-endpoint exchange. The HTTP
+/// client inside `ocean_protocol::oauth::refresh_token` already carries its own
+/// 15s total timeout; this wrapper guarantees the *await itself* is bounded
+/// even if a future client change (or a pathological resolver path) loses that
+/// bound. Load-bearing because `ensure_fresh` sits at the top of EVERY turn:
+/// an unbounded await here has fleet-wide blast radius (see the single-flight
+/// note below).
+const REFRESH_CALL_DEADLINE: Duration = Duration::from_secs(20);
+
 /// Refresh every expiring refreshable block in `auth_file`. Cheap no-op when
 /// the file is absent or every block is fresh. Never returns an error — a
 /// refresh failure degrades to today's behavior (expired block → missing
 /// credential) with a warning and a cooldown.
+///
+/// # Single-flight is SKIP, not QUEUE (daemon-freeze fix)
+///
+/// This function runs at the top of **every turn**. It used to take the global
+/// state lock with `.lock().await`, which made the lock a process-wide choke
+/// point: every concurrent turn *queued* behind whichever turn held the guard,
+/// and the guard was held across a network await and blocking file I/O. If the
+/// holder wedged (hung filesystem under `auth_file`, any unbounded await), every
+/// subsequent turn on every session parked here forever — silently, with no
+/// deadline and no log line: exactly the observed "all turns freeze at turn
+/// start, log goes quiet, process looks idle" failure.
+///
+/// Now a turn that finds a refresh already in flight **skips** (`try_lock`) —
+/// the same graceful degradation as a failed refresh: credential resolution
+/// proceeds with whatever is on disk. At most one turn ever pays for (or is
+/// exposed to) the refresh; a wedged refresh can strand only itself, never the
+/// fleet. The single-flight guarantee that matters — never two concurrent
+/// exchanges double-spending a rotating refresh token — is preserved.
 pub async fn ensure_fresh(auth_file: &Path) {
     if !auth_file.exists() {
         return;
     }
-    let mut guard = state().lock().await;
+    let Ok(mut guard) = state().try_lock() else {
+        tracing::debug!(
+            "OAuth refresh already in flight; proceeding with on-disk credentials"
+        );
+        return;
+    };
 
     let Ok(raw) = std::fs::read_to_string(auth_file) else {
         return;
@@ -115,7 +147,22 @@ pub async fn ensure_fresh(auth_file: &Path) {
             std::env::var(def.endpoint_env).unwrap_or_else(|_| def.default_endpoint.to_string());
         let client_id =
             std::env::var(def.client_id_env).unwrap_or_else(|_| def.default_client_id.to_string());
-        match ocean_protocol::oauth::refresh_token(&endpoint, &client_id, &refresh).await {
+        // Outer deadline (see REFRESH_CALL_DEADLINE): a refresh that outlives
+        // it is treated exactly like a failed refresh — warn + cooldown — so
+        // this await can never hold the single-flight guard unboundedly.
+        let refreshed = match tokio::time::timeout(
+            REFRESH_CALL_DEADLINE,
+            ocean_protocol::oauth::refresh_token(&endpoint, &client_id, &refresh),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => Err(ocean_protocol::Error::InvalidResponse(format!(
+                "token refresh exceeded the {}s outer deadline",
+                REFRESH_CALL_DEADLINE.as_secs()
+            ))),
+        };
+        match refreshed {
             Ok(fresh) => {
                 let entry = json
                     .get_mut(def.block)
@@ -252,6 +299,50 @@ mod tests {
             round["deepseek"]["api_key"], "keep-me",
             "unrelated provider keys must survive the rewrite"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Daemon-freeze regression (single-flight = SKIP, not QUEUE): while one
+    /// refresh pass holds the global state lock — stand-in for a wedged holder
+    /// stuck in a network await or on a hung filesystem — every other turn's
+    /// `ensure_fresh` must return immediately instead of parking on the lock.
+    /// Before the fix this test would hang until the held guard was dropped:
+    /// the exact interleaving that froze every turn on the fleet.
+    #[tokio::test]
+    async fn in_flight_refresh_never_queues_other_turns() {
+        let dir = std::env::temp_dir().join(format!(
+            "ocean-oauth-inflight-{}-{:x}",
+            std::process::id(),
+            unix_secs()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("auth.json");
+        std::fs::write(
+            &path,
+            json!({
+                "claude-code": { "type": "oauth", "access": "stale", "refresh": "rt", "expires": 1 }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // Simulate an in-flight (possibly wedged) refresh holding the guard.
+        let held = state().lock().await;
+
+        let start = std::time::Instant::now();
+        ensure_fresh(&path).await;
+        let elapsed = start.elapsed();
+
+        drop(held);
+
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "ensure_fresh must skip (not queue) while a refresh is in flight; \
+             waited {elapsed:?}"
+        );
+        // The skipping turn must not have touched the file (no exchange ran).
+        let round: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(round["claude-code"]["access"], "stale");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
