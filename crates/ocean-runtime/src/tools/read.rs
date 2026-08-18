@@ -131,6 +131,16 @@ impl ReadTool {
 
 #[async_trait]
 impl AgentTool for ReadTool {
+    /// Local-disk I/O with a model-chosen path goes straight into in-process
+    /// `open(2)`/`read(2)`/`write(2)` — the calls a privacy-gated (macOS TCC)
+    /// or dead-mount path blocks forever, freezing the turn (the proven Mini
+    /// production freeze). Bound tighter than the generic default: a local fs
+    /// op that takes two minutes IS the wedge this deadline exists for.
+    fn execute_timeout(&self, _args: &Value) -> Option<std::time::Duration> {
+        Some(std::time::Duration::from_secs(
+            crate::types::LOCAL_FS_TOOL_TIMEOUT_SECS,
+        ))
+    }
     fn name(&self) -> &str {
         "read"
     }
@@ -292,6 +302,21 @@ mod tests {
     /// Pull the first text block out of a tool result.
     fn body(r: &AgentToolResult) -> &str {
         r.content.first().and_then(|c| c.as_text()).unwrap_or("")
+    }
+
+    /// `read` opens model-chosen paths in-process — the exact call the Mini
+    /// production freeze parked in forever (a TCC-gated `open(2)` under
+    /// ~/Documents that never resolves). It must carry the tight local-fs
+    /// deadline, not the generic one.
+    #[test]
+    fn read_carries_the_local_fs_deadline() {
+        let t = ReadTool::new();
+        assert_eq!(
+            t.execute_timeout(&json!({"path": "/x"})),
+            Some(std::time::Duration::from_secs(
+                crate::types::LOCAL_FS_TOOL_TIMEOUT_SECS
+            ))
+        );
     }
 
     /// Regression: a model-supplied `offset` past EOF must return an empty read,

@@ -16,6 +16,11 @@ use crate::types::{AgentTool, AgentToolResult};
 /// (`cap_tool_content`); this bound is about process memory, not tokens.
 const MAX_CAPTURE_BYTES: usize = 2 * 1024 * 1024;
 
+/// Subprocess wall-clock bound when the model passes no `timeout_ms`. Also the
+/// base of [`AgentTool::execute_timeout`], which adds grace on top so the
+/// loop-level abandon never races the tool's own (kill-on-drop) enforcement.
+const DEFAULT_TIMEOUT_MS: u64 = 120_000;
+
 pub struct BashTool {
     cwd: Option<PathBuf>,
 }
@@ -124,6 +129,17 @@ impl AgentTool for BashTool {
             "required": ["command"]
         })
     }
+    /// The loop-level deadline tracks the caller-chosen `timeout_ms` (the same
+    /// value `execute` enforces on the subprocess) plus grace for spawn and
+    /// output handling. A fixed loop default would either kill legitimate long
+    /// commands or leave a wedged spawn path unbounded.
+    fn execute_timeout(&self, args: &Value) -> Option<Duration> {
+        let timeout_ms = args
+            .get("timeout_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(DEFAULT_TIMEOUT_MS);
+        Some(Duration::from_millis(timeout_ms).saturating_add(Duration::from_secs(30)))
+    }
     async fn execute(&self, _id: &str, args: Value) -> Result<AgentToolResult, String> {
         let cmd = args
             .get("command")
@@ -132,7 +148,7 @@ impl AgentTool for BashTool {
         let timeout_ms = args
             .get("timeout_ms")
             .and_then(|v| v.as_u64())
-            .unwrap_or(120_000);
+            .unwrap_or(DEFAULT_TIMEOUT_MS);
 
         let mut command = Command::new("bash");
         command.arg("-lc").arg(cmd);
@@ -206,5 +222,27 @@ impl AgentTool for BashTool {
         }
         combined.push_str(&format!("\n[exit {code}]"));
         Ok(AgentToolResult::text(combined))
+    }
+}
+
+#[cfg(test)]
+mod execute_timeout_tests {
+    use super::*;
+
+    /// The loop-level deadline must track the caller-chosen `timeout_ms` (plus
+    /// grace), never a fixed cap — a fixed cap would kill a legitimate long
+    /// build the model explicitly budgeted for.
+    #[test]
+    fn loop_deadline_tracks_args_timeout_plus_grace() {
+        let tool = BashTool::new();
+        assert_eq!(
+            tool.execute_timeout(&json!({"command": "x", "timeout_ms": 600_000})),
+            Some(Duration::from_millis(600_000) + Duration::from_secs(30))
+        );
+        // No timeout_ms → the same default the subprocess enforcement uses.
+        assert_eq!(
+            tool.execute_timeout(&json!({"command": "x"})),
+            Some(Duration::from_millis(DEFAULT_TIMEOUT_MS) + Duration::from_secs(30))
+        );
     }
 }

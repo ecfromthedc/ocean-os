@@ -1263,27 +1263,80 @@ async fn run_one(
         tool_call_id = %id
     );
     match tool {
-        Some(tool) => match tool.execute(&id, args).instrument(tool_span).await {
-            Ok(AgentToolResult {
-                content,
-                details,
-                terminate,
-                side_effects,
-            }) => Outcome {
-                content,
-                is_error: false,
-                terminate,
-                side_effects,
-                details,
-            },
-            Err(e) => Outcome {
-                content: vec![Content::text(format!("tool error: {e}"))],
-                is_error: true,
-                terminate: false,
-                side_effects: Vec::new(),
-                details: Value::Null,
-            },
-        },
+        Some(tool) => {
+            // Bound the call by the tool's own deadline (args in hand — bash
+            // derives it from `timeout_ms`). Without this, ONE tool blocked
+            // forever inside the OS froze the whole turn silently: no log, no
+            // state change, session lease held for good. Proven in production
+            // on the Mini — `read` of a file under ~/Documents parked in
+            // `open(2)` forever because macOS TCC never resolved consent for
+            // the launchd daemon. The round deadline does NOT cover tool
+            // execution (only the provider stream), so this is the only bound.
+            let deadline = tool.execute_timeout(&args);
+            let work = tool.execute(&id, args).instrument(tool_span);
+            let result = match deadline {
+                Some(limit) => match tokio::time::timeout(limit, work).await {
+                    Ok(result) => result,
+                    Err(_elapsed) => {
+                        let secs = limit.as_secs();
+                        // The future is dropped, but an operation blocked in a
+                        // syscall (tokio::fs runs on the blocking pool) cannot
+                        // be cancelled — that thread leaks until the kernel
+                        // releases it. Say so: it is the forensic signature.
+                        tracing::warn!(
+                            tool_name = %name,
+                            tool_call_id = %id,
+                            timeout_secs = secs,
+                            "tool execution abandoned at its deadline; the underlying \
+                             operation may still be blocked in the OS (a blocking-pool \
+                             thread leaks until the kernel releases it)"
+                        );
+                        return Outcome {
+                            content: vec![Content::text(format!(
+                                "tool error: '{name}' exceeded its {secs}s execution deadline \
+                                 and was abandoned. The operation is still blocked inside the \
+                                 operating system — common causes: a privacy-protected folder \
+                                 this daemon has no access grant for (macOS TCC on ~/Documents, \
+                                 ~/Desktop, ~/Downloads), a dead network/cloud mount, or a \
+                                 special file such as a FIFO. Retrying the same arguments will \
+                                 hang again — use a different path (or the bash tool, whose \
+                                 subprocess is separately authorized) or report this to the \
+                                 operator."
+                            ))],
+                            is_error: true,
+                            terminate: false,
+                            side_effects: Vec::new(),
+                            details: serde_json::json!({
+                                "timed_out": true,
+                                "timeout_secs": secs,
+                            }),
+                        };
+                    }
+                },
+                None => work.await,
+            };
+            match result {
+                Ok(AgentToolResult {
+                    content,
+                    details,
+                    terminate,
+                    side_effects,
+                }) => Outcome {
+                    content,
+                    is_error: false,
+                    terminate,
+                    side_effects,
+                    details,
+                },
+                Err(e) => Outcome {
+                    content: vec![Content::text(format!("tool error: {e}"))],
+                    is_error: true,
+                    terminate: false,
+                    side_effects: Vec::new(),
+                    details: Value::Null,
+                },
+            }
+        }
         None => Outcome {
             content: vec![Content::text(format!("unknown tool: {name}"))],
             is_error: true,
