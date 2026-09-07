@@ -689,6 +689,7 @@ pub fn known_models() -> Vec<KnownModel> {
         // are about to stop existing.
         m("deepseek-v4-pro", "deepseek", "DeepSeek V4 Pro"),
         m("deepseek-v4-flash", "deepseek", "DeepSeek V4 Flash"),
+        m("gpt-6-astra", "openai-codex", "GPT-6 Astra (Codex)"),
         m("gpt-5.6-sol", "openai-codex", "GPT-5.6 Sol (Codex)"),
         m("gpt-5.6-terra", "openai-codex", "GPT-5.6 Terra (Codex)"),
         m("gpt-5.6-luna", "openai-codex", "GPT-5.6 Luna (Codex)"),
@@ -711,6 +712,11 @@ pub fn known_models() -> Vec<KnownModel> {
         m("claude-sonnet-5", "claude-code", "Claude Sonnet 5"),
         m("claude-haiku-4-5", "claude-code", "Claude Haiku 4.5"),
         m("claude-code-fable-5", "claude-code", "Claude Code Fable 5"),
+        m(
+            "claude-code-fable-5-1",
+            "claude-code",
+            "Claude Code Fable 5.1",
+        ),
         // MiniMax ids use the API casing the resolver returns as current.model
         // (`MiniMax-M2`, not the lowercase alias), so `id == current.model`
         // holds for every entry — ACP/Zed match the selected mode id against the
@@ -722,6 +728,8 @@ pub fn known_models() -> Vec<KnownModel> {
         m("kimi-k3", "kimi", "Kimi K3"),
         m("kimi-k2.6", "kimi", "Kimi K2.6"),
         m("kimi-k2", "kimi", "Kimi K2"),
+        m("glm-5.3", "glm", "GLM 5.3"),
+        m("glm-5.3-flash", "glm", "GLM 5.3 Flash"),
         m("glm-5.2", "glm", "GLM 5.2"),
         m("glm-4.7", "glm", "GLM 4.7"),
         m("glm-4.6", "glm", "GLM 4.6"),
@@ -847,6 +855,13 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
             128_000,
             16_384,
         )),
+        "gpt-6-astra" => Ok(model_selection(
+            ProviderId::OpenAiCodex,
+            "gpt-6-astra",
+            CODEX_BASE_URL,
+            1_050_000,
+            128_000,
+        )),
         "gpt-5.6-sol" | "gpt-5-6-sol" => Ok(model_selection(
             ProviderId::OpenAiCodex,
             "gpt-5.6-sol",
@@ -964,6 +979,15 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
                 16_384,
             ))
         }
+        // Fable 5.1 — current point release. The plain wire id must resolve
+        // because pinned sessions replay it; `fable` stays on 5.0.
+        "claude-code-fable-5-1" | "claude-fable-5-1" => Ok(model_selection(
+            ProviderId::ClaudeCode,
+            "claude-code-fable-5-1",
+            ANTHROPIC_BASE_URL,
+            200_000,
+            16_384,
+        )),
         "claude-code-opus-5" | "claude-code-opus" | "cc-opus" => Ok(model_selection(
             ProviderId::ClaudeCode,
             "claude-code-opus-5",
@@ -1080,6 +1104,20 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
         "glm-5.2" | "glm-5-2" => Ok(model_selection(
             ProviderId::Glm,
             "glm-5.2",
+            glm_base_url(env),
+            200_000,
+            8_192,
+        )),
+        "glm-5.3" | "glm-5-3" => Ok(model_selection(
+            ProviderId::Glm,
+            "glm-5.3",
+            glm_base_url(env),
+            200_000,
+            8_192,
+        )),
+        "glm-5.3-flash" | "glm-5-3-flash" => Ok(model_selection(
+            ProviderId::Glm,
+            "glm-5.3-flash",
             glm_base_url(env),
             200_000,
             8_192,
@@ -2003,6 +2041,7 @@ mod tests {
             "deepseek-v4-pro",
             "gpt-4o",
             "gpt-4o-mini",
+            "gpt-6-astra",
             "gpt-5.6-sol",
             "gpt-5.6-terra",
             "gpt-5.6-luna",
@@ -2018,6 +2057,7 @@ mod tests {
             "claude-sonnet-5",
             "claude-haiku-4-5",
             "claude-code-fable-5",
+            "claude-code-fable-5-1",
             // API-cased ids: `resolve_model_selection` returns these as
             // current.model, and known_models() advertises the same string.
             "MiniMax-M2",
@@ -2026,6 +2066,8 @@ mod tests {
             "kimi-k3",
             "kimi-k2.6",
             "kimi-k2",
+            "glm-5.3",
+            "glm-5.3-flash",
             "glm-5.2",
             "glm-4.7",
             "glm-4.6",
