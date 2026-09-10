@@ -19,7 +19,9 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
   deadline by default. A positive `OCEAN_PROMPT_TIMEOUT_SECS` opts into a
   handler deadline and returns HTTP 408 with `PromptResponse.code = 408`; the
   provider round and stream-stall limits remain separate runtime/protocol
-  controls.
+  controls. Every response carries `ok`, `code`, `stdout`, and `stop_reason`;
+  multi-hour callers must leave the handler timeout unset or set it above the
+  expected total session duration.
 - Do not bypass runtime permission gates from daemon route code.
 - Global approval policy is exposed at `GET/POST /v1/settings/permissions` with
   manual, automatic (default), and skip-all modes; the legacy yolo endpoint

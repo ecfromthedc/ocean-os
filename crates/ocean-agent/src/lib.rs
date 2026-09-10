@@ -762,7 +762,8 @@ impl AgentRuntime {
                         request_id: Some(request_id),
                         ok: false,
                         session_id: req.session_id,
-                        code: None,
+                        code: 400,
+                        stop_reason: "invalid_request".into(),
                         wall_ms: start.elapsed().as_millis() as u64,
                         stdout: String::new(),
                         stderr: e.to_string(),
@@ -814,7 +815,8 @@ impl AgentRuntime {
                     request_id: Some(request_id),
                     ok: false,
                     session_id: req.session_id,
-                    code: None,
+                    code: 1,
+                    stop_reason: "provider_unavailable".into(),
                     wall_ms: start.elapsed().as_millis() as u64,
                     stdout: String::new(),
                     stderr,
@@ -848,35 +850,46 @@ impl AgentRuntime {
             .await;
 
         match result {
-            Ok((session_id, stdout, stderr, usage)) => PromptResponse {
+            Ok(run) => PromptResponse {
                 request_id: Some(request_id),
                 ok: true,
-                session_id: Some(session_id),
-                code: Some(0),
+                session_id: Some(run.session_id),
+                code: 0,
+                stop_reason: run.stop_reason,
                 wall_ms: start.elapsed().as_millis() as u64,
-                stdout,
-                stderr,
+                stdout: run.stdout,
+                stderr: run.stderr,
                 cwd,
-                usage,
+                usage: run.usage,
             },
             Err(e) => {
                 // Surface a per-turn timeout distinctly so the daemon can map it
-                // to HTTP 408. `run_agent_with_history` propagates the failure as
-                // an `anyhow::Error`, so recover the concrete `AgentError` variant
-                // by downcast; a `Timeout` sets code 408, everything else stays
-                // `None` (generic failure).
-                let code = e
-                    .downcast_ref::<AgentError>()
-                    .filter(|err| matches!(err, AgentError::Timeout { .. }))
-                    .map(|_| 408);
+                // to HTTP 408. Pre-stream failover bookkeeping may wrap the
+                // concrete AgentError, so classify through that wrapper as well.
+                let partial_stdout = e
+                    .downcast_ref::<TurnFailure>()
+                    .map(|failure| failure.stdout.clone())
+                    .unwrap_or_default();
+                let partial_stderr = e
+                    .downcast_ref::<TurnFailure>()
+                    .map(|failure| failure.stderr.trim_end().to_string())
+                    .unwrap_or_default();
+                let code = prompt_error_code(&e);
+                let stop_reason = prompt_error_stop_reason(&e);
+                let stderr = if partial_stderr.is_empty() {
+                    e.to_string()
+                } else {
+                    format!("{}\n{}", partial_stderr, e)
+                };
                 PromptResponse {
                     request_id: Some(request_id),
                     ok: false,
                     session_id: req.session_id,
                     code,
+                    stop_reason: stop_reason.into(),
                     wall_ms: start.elapsed().as_millis() as u64,
-                    stdout: String::new(),
-                    stderr: e.to_string(),
+                    stdout: partial_stdout,
+                    stderr,
                     cwd,
                     usage: TokenUsage::default(),
                 }
@@ -959,9 +972,9 @@ impl AgentRuntime {
     ///   other than the one that just failed), so failover can never fan out or
     ///   loop. If the alternate also fails, its error is returned.
     ///
-    /// The returned error is always the plain underlying `anyhow::Error` (the
-    /// internal [`TurnFailure`] wrapper is unwrapped here), so `prompt`'s existing
-    /// `AgentError` downcast — e.g. the 408 timeout mapping — is unchanged.
+    /// The returned error retains the internal [`TurnFailure`] wrapper so the
+    /// prompt response can preserve any output emitted before a final provider
+    /// failure. The concrete `AgentError` remains nested for classification.
     ///
     /// `env` is the same per-turn environment snapshot used for selection-time
     /// failover, so the connect-failure fallback draws from the identical
@@ -973,7 +986,7 @@ impl AgentRuntime {
         state: RuntimeState,
         env: &ProviderEnv,
         admitted_lease: Option<&SessionOperationLease>,
-    ) -> anyhow::Result<(SessionId, String, String, TokenUsage)> {
+    ) -> anyhow::Result<PromptRun> {
         // Pin an implicit new session once for the whole primary+fallback
         // attempt. Otherwise each dispatch mints independently, orphaning the
         // primary's durable accepted-user checkpoint on pre-stream failover.
@@ -1010,16 +1023,17 @@ impl AgentRuntime {
             Ok(ok) => (ok, state),
             Err(e) => {
                 if !failover_eligible(&e) {
-                    // Mid-stream, user-error, or non-availability — final. Unwrap
-                    // any TurnFailure wrapper so the caller sees the bare error.
-                    return Err(unwrap_turn_failure(e));
+                    // Mid-stream, user-error, or non-availability — final. Keep
+                    // the TurnFailure wrapper so the prompt response can retain
+                    // any text emitted before the failure.
+                    return Err(e);
                 }
                 // Pre-stream availability failure: try ONE ready alternate.
                 let alternate = ocean_providers::resolve_fallback_config(env, &failed_provider)
                     .and_then(|cfg| state_from_provider_config(cfg).ok());
                 let Some(alt_state) = alternate else {
                     // No alternate to try — return the original failure as-is.
-                    return Err(unwrap_turn_failure(e));
+                    return Err(e);
                 };
                 tracing::warn!(
                     primary_provider = failed_provider.as_str(),
@@ -1051,8 +1065,7 @@ impl AgentRuntime {
                 // it rather than appending the same prompt a second time.
                 let ok = self
                     .dispatch_turn(req.clone(), control.clone(), &alt_state, true)
-                    .await
-                    .map_err(unwrap_turn_failure)?;
+                    .await?;
                 (ok, alt_state)
             }
         };
@@ -1084,11 +1097,11 @@ impl AgentRuntime {
     ///   appended to stderr and never fail the already-completed turn.
     async fn run_stop_hook_continuations(
         &self,
-        turn: (SessionId, String, String, TokenUsage),
+        turn: PromptRun,
         req: &PromptRequest,
         control: &PromptControl,
         state: &RuntimeState,
-    ) -> (SessionId, String, String, TokenUsage) {
+    ) -> PromptRun {
         use ocean_hooks::{HookEvent, HookOutcome};
 
         /// Hard upper bound on hook-driven continuation turns per operator
@@ -1099,7 +1112,13 @@ impl AgentRuntime {
         if self.hooks.count_for(HookEvent::Stop) == 0 {
             return turn;
         }
-        let (session_id, mut stdout, mut stderr, mut usage) = turn;
+        let PromptRun {
+            session_id,
+            mut stdout,
+            mut stderr,
+            mut usage,
+            mut stop_reason,
+        } = turn;
         let context = ocean_hooks::HookContext::new(req.cwd.clone(), session_id.to_string());
         let mut stop_hook_active = false;
         for _ in 0..=MAX_STOP_HOOK_CONTINUATIONS {
@@ -1130,7 +1149,14 @@ impl AgentRuntime {
                 .dispatch_turn(follow, control.clone(), state, false)
                 .await
             {
-                Ok((_, cont_stdout, cont_stderr, cont_usage)) => {
+                Ok(cont) => {
+                    let PromptRun {
+                        stdout: cont_stdout,
+                        stderr: cont_stderr,
+                        usage: cont_usage,
+                        stop_reason: cont_stop_reason,
+                        ..
+                    } = cont;
                     if !stdout.is_empty() && !stdout.ends_with('\n') {
                         stdout.push('\n');
                     }
@@ -1141,6 +1167,7 @@ impl AgentRuntime {
                     usage.cache_read += cont_usage.cache_read;
                     usage.cache_write += cont_usage.cache_write;
                     usage.total_tokens += cont_usage.total_tokens;
+                    stop_reason = cont_stop_reason;
                 }
                 Err(e) => {
                     // Fail-open: the operator's turn already completed and
@@ -1151,7 +1178,13 @@ impl AgentRuntime {
                 }
             }
         }
-        (session_id, stdout, stderr, usage)
+        PromptRun {
+            session_id,
+            stdout,
+            stderr,
+            usage,
+            stop_reason,
+        }
     }
 
     /// Dispatch a single turn to the fake echo path or the real agent loop,
@@ -1166,7 +1199,7 @@ impl AgentRuntime {
         control: PromptControl,
         snapshot: &RuntimeState,
         reuse_accepted_user: bool,
-    ) -> anyhow::Result<(SessionId, String, String, TokenUsage)> {
+    ) -> anyhow::Result<PromptRun> {
         // Fake provider dispatch. The default `fake-ok` is a text-only echo that
         // never touches the runtime loop (`run_fake_prompt`). The OCEAN-130
         // `fake-tool` variant is different: it must trip the *real* permission
@@ -1866,7 +1899,7 @@ impl AgentRuntime {
         control: PromptControl,
         snapshot: &RuntimeState,
         reuse_accepted_user: bool,
-    ) -> anyhow::Result<(SessionId, String, String, TokenUsage)> {
+    ) -> anyhow::Result<PromptRun> {
         anyhow::ensure!(!req.prompt.trim().is_empty(), "prompt cannot be empty");
 
         let session_id = req.session_id.unwrap_or_else(SessionId::new_v4);
@@ -1933,7 +1966,13 @@ impl AgentRuntime {
         session::save(&self.config_dir, &session)?;
 
         // The fake provider does no real inference; report zero usage.
-        Ok((session.id, stdout, String::new(), TokenUsage::default()))
+        Ok(PromptRun {
+            session_id: session.id,
+            stdout,
+            stderr: String::new(),
+            usage: TokenUsage::default(),
+            stop_reason: "completed".into(),
+        })
     }
 
     // OCEAN-274: the `runtime.prompt` span — the session/history layer's slice of
@@ -1950,7 +1989,7 @@ impl AgentRuntime {
         control: PromptControl,
         snapshot: &RuntimeState,
         reuse_accepted_user: bool,
-    ) -> anyhow::Result<(SessionId, String, String, TokenUsage)> {
+    ) -> anyhow::Result<PromptRun> {
         anyhow::ensure!(!req.prompt.trim().is_empty(), "prompt cannot be empty");
 
         // Session label for a first-turn (the daemon-supplied pre-composition
@@ -2307,22 +2346,41 @@ impl AgentRuntime {
                         tracing::info_span!("checkpoint", messages = persisted.len());
                     let _checkpoint = checkpoint_span.enter();
                     session.replace_messages(persisted);
-                    session::save(&self.config_dir, &session)?;
+                    if let Err(error) = session::save(&self.config_dir, &session) {
+                        return Err(TurnFailure {
+                            streamed_output,
+                            stdout,
+                            stderr,
+                            error: error.context("turn checkpoint persistence failed"),
+                        }
+                        .into());
+                    }
                 }
                 _ => {}
             }
         }
 
-        let run = match handle.join().await.context("agent task join failed")? {
-            Ok(run) => run,
+        let run = match handle.join().await {
+            Ok(Ok(run)) => run,
+            Err(join_error) => {
+                return Err(TurnFailure {
+                    streamed_output,
+                    stdout,
+                    stderr,
+                    error: anyhow::Error::new(join_error).context("agent task join failed"),
+                }
+                .into());
+            }
             // The agent loop failed. Carry the `streamed_output` flag out so the
             // caller can decide whether failover is safe (only when nothing
             // streamed). We do NOT save the session here — a failed turn commits
             // no transcript, so a fallback retry starts from the same clean
             // history with no partial/duplicated state.
-            Err(e) => {
+            Ok(Err(e)) => {
                 return Err(TurnFailure {
                     streamed_output,
+                    stdout,
+                    stderr,
                     // Box as anyhow so the failover classifier can downcast back
                     // to the concrete `AgentError`/protocol cause.
                     error: anyhow::Error::new(e),
@@ -2345,7 +2403,15 @@ impl AgentRuntime {
         {
             let _persist = persist_span.enter();
             session.replace_messages(persisted);
-            session::save(&self.config_dir, &session)?;
+            if let Err(error) = session::save(&self.config_dir, &session) {
+                return Err(TurnFailure {
+                    streamed_output,
+                    stdout,
+                    stderr,
+                    error: error.context("turn persistence failed"),
+                }
+                .into());
+            }
         }
 
         if stdout.trim().is_empty() {
@@ -2368,12 +2434,30 @@ impl AgentRuntime {
             context_window: u64::from(snapshot.model.context_window),
         };
 
-        Ok((session.id, stdout, stderr, usage))
+        Ok(PromptRun {
+            session_id: session.id,
+            stdout,
+            stderr,
+            usage,
+            stop_reason: run.stop_reason,
+        })
     }
 }
 
+/// Result of one prompt dispatch. Kept private because the public `/v1/prompt`
+/// contract is `ocean_core::PromptResponse`; carrying the terminal reason here
+/// prevents the session layer from having to infer it from stderr text.
+struct PromptRun {
+    session_id: SessionId,
+    stdout: String,
+    stderr: String,
+    usage: TokenUsage,
+    stop_reason: String,
+}
+
 /// A failed turn, carrying whether the provider had begun streaming output when
-/// it failed (OCEAN-275).
+/// it failed (OCEAN-275) plus any output accumulated by the parent while it
+/// owned the runtime task.
 ///
 /// `run_prompt` wraps its underlying `anyhow::Error` in this so the failover
 /// decision in [`AgentRuntime::prompt`] can recover the `streamed_output` flag by
@@ -2381,8 +2465,7 @@ impl AgentRuntime {
 /// attempted when `streamed_output == false` (a pre-stream connect-failure), so a
 /// turn that already emitted assistant text or ran a tool is NEVER replayed
 /// against a second provider. `Display`/`source` delegate to the inner error, so
-/// the user-facing message and `downcast_ref::<AgentError>()` (the existing 408
-/// timeout mapping) keep working unchanged.
+/// the user-facing provider message remains unchanged.
 /// Tokio detaches a spawned task when its `JoinHandle` is dropped. Agent turns
 /// cannot use that default: the parent owns the session lock and persistence,
 /// so a detached child could keep executing side-effecting tools with no owner
@@ -2417,7 +2500,43 @@ impl<T> Drop for AbortOnDropJoinHandle<T> {
 #[derive(Debug)]
 struct TurnFailure {
     streamed_output: bool,
+    stdout: String,
+    stderr: String,
     error: anyhow::Error,
+}
+
+fn prompt_agent_error(error: &anyhow::Error) -> Option<&AgentError> {
+    if let Some(agent_error) = error.downcast_ref::<AgentError>() {
+        return Some(agent_error);
+    }
+    error
+        .downcast_ref::<TurnFailure>()
+        .and_then(|failure| failure.error.downcast_ref::<AgentError>())
+}
+
+fn prompt_error_code(error: &anyhow::Error) -> i32 {
+    match prompt_agent_error(error) {
+        Some(AgentError::Timeout { .. }) => 408,
+        Some(AgentError::Provider(ocean_protocol::Error::ProviderError { status, .. })) => {
+            i32::from(*status)
+        }
+        _ => 1,
+    }
+}
+
+fn prompt_error_stop_reason(error: &anyhow::Error) -> &'static str {
+    match prompt_agent_error(error) {
+        Some(AgentError::Cancelled) => "cancelled",
+        Some(AgentError::MaxTurns(_)) => "max_turns",
+        Some(AgentError::Timeout { .. }) => "provider_round_timeout",
+        Some(AgentError::Tool { .. }) => "tool_error",
+        Some(AgentError::Provider(ocean_protocol::Error::ProviderError { .. })) => {
+            "provider_rejected"
+        }
+        Some(AgentError::Provider(_)) => "provider_error",
+        Some(AgentError::Other(_)) => "runtime_error",
+        None => "runtime_error",
+    }
 }
 
 impl std::fmt::Display for TurnFailure {
@@ -2473,6 +2592,7 @@ fn failover_eligible(err: &anyhow::Error) -> bool {
 /// `prompt`'s error handling — the 408 timeout `downcast_ref::<AgentError>()` and
 /// the `Display` shown to the caller — expects the original error, not the
 /// failover-bookkeeping wrapper. A non-`TurnFailure` error passes through.
+#[cfg(test)]
 fn unwrap_turn_failure(err: anyhow::Error) -> anyhow::Error {
     match err.downcast::<TurnFailure>() {
         Ok(turn) => turn.error,
@@ -6104,6 +6224,8 @@ done
     fn failover_eligible_for_prestream_availability_error() {
         let err: anyhow::Error = TurnFailure {
             streamed_output: false,
+            stdout: String::new(),
+            stderr: String::new(),
             error: anyhow::Error::new(AgentError::Provider(ocean_protocol::Error::ProviderError {
                 status: 503,
                 body: "overloaded".into(),
@@ -6120,6 +6242,8 @@ done
     fn no_failover_after_output_streamed_even_on_availability_error() {
         let err: anyhow::Error = TurnFailure {
             streamed_output: true,
+            stdout: String::new(),
+            stderr: String::new(),
             error: anyhow::Error::new(AgentError::Provider(ocean_protocol::Error::ProviderError {
                 status: 503,
                 body: "overloaded".into(),
@@ -6138,6 +6262,8 @@ done
     fn no_failover_on_user_error() {
         let err: anyhow::Error = TurnFailure {
             streamed_output: false,
+            stdout: String::new(),
+            stderr: String::new(),
             error: anyhow::Error::new(AgentError::Provider(ocean_protocol::Error::ProviderError {
                 status: 400,
                 body: "bad request".into(),
@@ -6161,6 +6287,8 @@ done
     fn unwrap_turn_failure_recovers_the_inner_agent_error() {
         let wrapped: anyhow::Error = TurnFailure {
             streamed_output: false,
+            stdout: String::new(),
+            stderr: String::new(),
             error: anyhow::Error::new(AgentError::Timeout { secs: 300 }),
         }
         .into();

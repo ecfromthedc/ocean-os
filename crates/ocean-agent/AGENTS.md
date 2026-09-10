@@ -35,6 +35,9 @@ This crate owns Ocean's agent session/history layer and project prompt loading. 
   `OCEAN_PROVIDER_ROUND_TIMEOUT_SECS` (default 300 seconds per provider round).
   An explicit request `max_turns` wins, and the historical
   `OCEAN_TURN_TIMEOUT_SECS` name remains a timeout alias.
+- Legacy `PromptResponse` always serializes `ok`, integer `code`, `stdout`,
+  and `stop_reason`; failed provider/persist turns retain partial stdout.
+  A max-turn terminal synthesis is reported as `stop_reason: "max_turns"`.
 - Pre-stream provider failover must pin one session id and hold one per-session turn lock across the complete primary/fallback transaction, reusing the primary attempt's durable accepted-user row; never allow an intervening turn, append the operator prompt twice, or orphan an acceptance-only session.
 - Track-0 room prompt guidance is retired; prompt assembly must not infer a closed room role from agent-turn input.
 - Desktop Surface guidance is exclusively `surface-tauri` and uses the shared

@@ -33,6 +33,10 @@ This crate owns the Ocean agent loop and permission-gated tool execution runtime
   multi-round wall-clock budget. The agent loop's separate default round-count
   ceiling is 32; daemon callers may override both through the agent-owned env
   wiring.
+- `AgentRun::stop_reason` reports the terminal cause (`completed`, provider
+  outcome, cancellation, tool termination, or `max_turns`). An explicit
+  request `max_turns` is authoritative; long-history trimming must preserve a
+  real user message before provider encoding.
 - Every provider round in a bound agent session must copy `AgentConfig::session_id` into `StreamOptions::session_id`; providers use that stable identity for cross-round prompt caching and request correlation.
 - Exact `kimi`/`kimi-k3` turns use bounded dynamic tool discovery: expose only
   the synthetic permission-free `search_tools` globally and return at most eight

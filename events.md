@@ -6071,3 +6071,29 @@ multi-turn two-tool-call regression test covering roles, ordering, content,
 tool-call JSON arguments, and exact message keys. The GLM route is wired by
 `ocean-providers` as `ProviderId::Glm` with the `openai-completions` API; other
 compatible providers are unchanged.
+
+_________________________________________________________________________________
+time:      [00:04] [09-10-26]
+agent:     [codex], [gpt-5]
+worktree:  fix/glm-messages
+type:      [bug fix]: GLM long-session termination and prompt result contract
+area:      [runtime]: provider history, session persistence, HTTP response
+
+The GLM long-session logs end in provider rounds 35 and 72, not a requested
+300-round cap: the final `provider_stream` closes and the enclosing
+`agent_loop`/`ocean_agent` close without a final checkpoint or persist. The
+missing error was discarded by the legacy prompt wrapper, producing the
+dispatcher symptom `ok False code None chars 0`. Added explicit provider-round
+failure logging, partial stdout/stderr preservation, stable integer `code` and
+`stop_reason` fields, and terminal reasons for completion, provider outcomes,
+cancellation, tool termination, and max-turn synthesis.
+
+The available copies of `glmf1.log` and `glmf3.log` do not contain the claimed
+1214 text, but source inspection found the remaining invalid replay state: long
+tool-loop trimming could remove the only user message. GLM normalization now
+preserves/adds a non-empty user continuation and removes visible assistant text
+from tool-call messages. Added runtime and protocol regressions plus the
+backward-compatible response serialization test. `cargo build -p ocean-daemon
+--release` completed; the full protocol/agent suites are blocked only by the
+sandbox's loopback-listener permission in OAuth tests. Runtime tests remain
+offline-blocked by uncached `proptest` artifacts.

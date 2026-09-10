@@ -49,8 +49,10 @@ This crate owns the multi-provider LLM wire protocol layer for Anthropic, OpenAI
 - GLM (`provider = "glm"`) uses the OpenAI-compatible chat-completions transport
   with a stricter replay contract: `openai.rs` normalizes every serialized
   message to string `content`, substitutes a single space for empty content,
-  strips `reasoning_content`/`reasoning`, and keeps tool-call/result ordering and
-  the standard `{id,type,function}` call shape. This normalization is GLM-only;
+  strips `reasoning_content`/`reasoning`, removes visible assistant text from
+  tool-call messages, and adds a non-empty user continuation when trimming
+  leaves no user turn. It keeps tool-call/result ordering and the standard
+  `{id,type,function}` call shape. This normalization is GLM-only;
   DeepSeek, OpenAI, Kimi, and other compatible routes retain their existing
   wire behavior.
 - Shared streaming clients use a 10-second connection cap and a 120-second

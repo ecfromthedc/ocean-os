@@ -202,6 +202,10 @@ pub struct ProjectResponse {
     pub error: Option<String>,
 }
 
+fn default_prompt_stop_reason() -> String {
+    "unknown".into()
+}
+
 /// Response payload for `POST /v1/prompt`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PromptResponse {
@@ -210,8 +214,14 @@ pub struct PromptResponse {
     pub request_id: Option<RequestId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<SessionId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub code: Option<i32>,
+    /// Process-style result code. This is always serialized so clients can
+    /// handle successful, capped, and failed synchronous turns uniformly.
+    #[serde(default)]
+    pub code: i32,
+    /// Stable Ocean/provider terminal classification, independent of the HTTP
+    /// status code. Older payloads deserialize as `unknown`.
+    #[serde(default = "default_prompt_stop_reason")]
+    pub stop_reason: String,
     pub wall_ms: u64,
     pub stdout: String,
     pub stderr: String,
@@ -1319,6 +1329,38 @@ mod tests {
         assert_eq!(request.session_id, None);
         assert_eq!(request.max_turns, None);
         assert!(!request.yolo);
+    }
+
+    #[test]
+    fn prompt_response_always_serializes_terminal_fields() {
+        let response = PromptResponse {
+            ok: false,
+            request_id: None,
+            session_id: None,
+            code: 400,
+            stop_reason: "provider_rejected".into(),
+            wall_ms: 12,
+            stdout: "partial answer".into(),
+            stderr: "provider rejected".into(),
+            cwd: ".".into(),
+            usage: TokenUsage::default(),
+        };
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["code"], 400);
+        assert_eq!(json["stdout"], "partial answer");
+        assert_eq!(json["stop_reason"], "provider_rejected");
+
+        let legacy: PromptResponse = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "wall_ms": 0,
+            "stdout": "READY",
+            "stderr": "",
+            "cwd": "."
+        }))
+        .unwrap();
+        assert_eq!(legacy.code, 0);
+        assert_eq!(legacy.stop_reason, "unknown");
     }
 
     #[test]

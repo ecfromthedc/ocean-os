@@ -425,13 +425,13 @@ fn tool_wire(t: &crate::types::Tool) -> Value {
 ///
 /// GLM's OpenAI-compatible endpoint validates replayed history more strictly
 /// than the other backends on this path: every message must have string
-/// content, and an assistant message that only contains tool calls cannot use
-/// an empty/null content value. GLM also does not accept private reasoning
+/// content, and an assistant message containing tool calls cannot carry visible
+/// text alongside those calls. GLM also does not accept private reasoning
 /// fields echoed from a prior response. Keep this isolated to the `glm` route;
 /// DeepSeek, OpenAI, Kimi, and other compatible endpoints retain their existing
 /// wire shapes.
-fn normalize_glm_messages(messages: &mut [Value]) {
-    for message in messages {
+fn normalize_glm_messages(messages: &mut Vec<Value>) {
+    for message in &mut *messages {
         let Some(object) = message.as_object_mut() else {
             continue;
         };
@@ -454,6 +454,24 @@ fn normalize_glm_messages(messages: &mut [Value]) {
             _ => String::new(),
         };
 
+        // GLM rejects the OpenAI-compatible shape where an assistant message
+        // contains both visible text and `tool_calls` (the model's response is
+        // a tool request, not a text reply). The shared Ocean message type can
+        // contain both because other providers accept that shape, so repair it
+        // only at the GLM wire boundary. The one-space placeholder below keeps
+        // GLM's separate non-empty-string requirement satisfied.
+        let assistant_has_tool_calls = object.get("role").and_then(Value::as_str)
+            == Some("assistant")
+            && object
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .is_some_and(|calls| !calls.is_empty());
+        let content = if assistant_has_tool_calls {
+            String::new()
+        } else {
+            content
+        };
+
         // A single space is valid string content and avoids GLM's rejection of
         // an empty assistant content value on tool-call turns. Applying it to
         // every empty message also keeps the invariant simple for tool results
@@ -472,6 +490,24 @@ fn normalize_glm_messages(messages: &mut [Value]) {
         if object.get("role").and_then(Value::as_str) == Some("tool") {
             object.remove("name");
         }
+    }
+
+    // Z.AI rejects a request whose history contains only system/assistant/tool
+    // messages. Runtime context trimming can remove the original user turn
+    // when a long tool loop has no new user message, so keep this provider-only
+    // fallback at the final wire boundary as well. Normal turns retain their
+    // real user prompt; this is only for an already-trimmed or externally
+    // reconstructed history.
+    if !messages.iter().any(|message| {
+        message
+            .get("role")
+            .and_then(Value::as_str)
+            == Some("user")
+    }) {
+        messages.push(json!({
+            "role": "user",
+            "content": "Continue from the preceding context."
+        }));
     }
 }
 
@@ -1654,6 +1690,7 @@ mod tests {
                         thinking: "private planning must not be replayed".into(),
                         thinking_signature: Some("private-signature".into()),
                     },
+                    Content::text("I will inspect the files before summarizing them."),
                     Content::ToolCall {
                         id: "call-read".into(),
                         name: "read_file".into(),
@@ -1773,7 +1810,7 @@ mod tests {
         let assistant = &wire_messages[2];
         assert_eq!(
             assistant["content"], " ",
-            "empty GLM assistant tool-call content must be one space"
+            "GLM assistant tool-call text must be removed and replaced with one space"
         );
         let tool_calls = assistant["tool_calls"]
             .as_array()
@@ -1817,6 +1854,32 @@ mod tests {
         assert_eq!(wire_messages[4]["tool_call_id"], "call-git");
         assert_eq!(wire_messages[5]["role"], "assistant");
         assert_eq!(wire_messages[5]["content"], "The project status is green.");
+    }
+
+    #[test]
+    fn glm_history_without_user_gets_a_non_empty_user_turn() {
+        let messages = vec![Message::Assistant(AssistantMessage {
+            content: vec![Content::text("tool history without its original user turn")],
+            api: "openai-completions".into(),
+            provider: "glm".into(),
+            model: "glm-5.3".into(),
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: now_ms(),
+        })];
+        let context = Context {
+            messages,
+            ..Default::default()
+        };
+        let body = test_body(&glm_model(), &context, &StreamOptions::default());
+        let wire_messages = body["messages"].as_array().expect("messages array");
+        let user = wire_messages
+            .iter()
+            .find(|message| message["role"] == "user")
+            .expect("GLM history must contain a user message");
+        assert_eq!(user["content"], "Continue from the preceding context.");
+        assert!(user["content"].as_str().is_some_and(|text| !text.is_empty()));
     }
 
     // OCEAN-131: tool-result image parity. OpenAI's `role:tool` message can only
