@@ -46,6 +46,13 @@ This crate owns the multi-provider LLM wire protocol layer for Anthropic, OpenAI
   `tool_choice: "none"`. K3 omits fixed temperature, uses
   `max_completion_tokens`, maps enabled reasoning to `max`, and replays
   `reasoning_content` only from same-provider `kimi-k3` assistant history.
+- GLM (`provider = "glm"`) uses the OpenAI-compatible chat-completions transport
+  with a stricter replay contract: `openai.rs` normalizes every serialized
+  message to string `content`, substitutes a single space for empty content,
+  strips `reasoning_content`/`reasoning`, and keeps tool-call/result ordering and
+  the standard `{id,type,function}` call shape. This normalization is GLM-only;
+  DeepSeek, OpenAI, Kimi, and other compatible routes retain their existing
+  wire behavior.
 - `OCEAN_PROMPT_CAPTURE_DIR` is an opt-in local diagnostics path: capture the
   complete serialized JSON body only (never request headers or endpoint URLs),
   warn-and-continue on capture failures, and retain owner-only permissions

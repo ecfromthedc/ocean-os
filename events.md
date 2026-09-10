@@ -6024,3 +6024,19 @@ repository-wide `cargo xtask docs-check` reached the new active documents but
 remains blocked by ten pre-existing broken local links under the ignored
 `ocean-bedrock/node_modules` dependency tree; that dependency state was left
 untouched.
+
+_________________________________________________________________________________
+time:      [22:18] [09-09-26]
+agent:     [codex], [gpt-5]
+worktree:  fix/glm-messages
+type:      [bug report]: GLM strict chat-completions history
+area:      [backend]: provider wire serialization
+
+Added a GLM-only normalization pass to the OpenAI-compatible message encoder.
+It forces string content, replaces empty content with a single space, strips
+private reasoning fields, and defensively removes tool names from tool-result
+messages while preserving the existing tool-call/result wire shape. Added a
+multi-turn two-tool-call regression test covering roles, ordering, content,
+tool-call JSON arguments, and exact message keys. The GLM route is wired by
+`ocean-providers` as `ProviderId::Glm` with the `openai-completions` API; other
+compatible providers are unchanged.
