@@ -28,6 +28,11 @@ This crate owns the Ocean agent loop and permission-gated tool execution runtime
 - Keep provider concerns outside runtime unless mediated through the protocol/provider layers.
 - A tool-call batch runs through the concurrency scheduler (`agent_loop.rs`): consecutive `Concurrency::Shared` (read-only) tools run in one concurrent segment; a `Concurrency::Exclusive` tool (the default) is a full barrier. A new tool defaults to `Exclusive` — only override `concurrency()` to `Shared` when the tool is genuinely side-effect-free. Live `ToolExecutionEnd` + side-effect events must emit in completion order as each segment member finishes; persisted `ToolResult`s must remain in original batch order for provider pairing.
 - Blocking await boundaries in the agent loop (provider stream read, tool execution, retry backoff) must race the cancel token pre-yield via a biased `tokio::select!` on `cancelled(config)`. At a tool cancellation boundary, checkpoint the entire assistant tool-call batch with ordered real or conservative results, including not-yet-started barrier calls; completed side effects must never disappear into replayable history.
+- `AgentConfig::turn_timeout_secs` is a total 300-second-by-default deadline
+  for each provider round (request plus complete stream), not an overall
+  multi-round wall-clock budget. The agent loop's separate default round-count
+  ceiling is 32; daemon callers may override both through the agent-owned env
+  wiring.
 - Every provider round in a bound agent session must copy `AgentConfig::session_id` into `StreamOptions::session_id`; providers use that stable identity for cross-round prompt caching and request correlation.
 - Exact `kimi`/`kimi-k3` turns use bounded dynamic tool discovery: expose only
   the synthetic permission-free `search_tools` globally and return at most eight

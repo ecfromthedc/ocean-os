@@ -224,10 +224,12 @@ pub struct AgentConfig {
     pub model: Model,
     pub thinking_level: ThinkingLevel,
     pub stream_options: StreamOptions,
+    /// Maximum provider rounds in one agent loop. The daemon may supply an
+    /// environment-derived value; direct callers retain the default.
     pub max_turns: u32,
-    /// Total wall-clock deadline for a single turn's LLM stream
+    /// Total wall-clock deadline for a single provider round's stream
     /// (provider request + full stream consumption). `None` falls back to
-    /// [`AgentConfig::DEFAULT_TURN_TIMEOUT_SECS`]. A hung or slow provider that
+    /// [`AgentConfig::DEFAULT_PROVIDER_ROUND_TIMEOUT_SECS`]. A hung or slow provider that
     /// exceeds this window aborts the turn with [`crate::error::AgentError::Timeout`].
     pub turn_timeout_secs: Option<u32>,
     pub tools: Vec<Arc<dyn AgentTool>>,
@@ -248,15 +250,22 @@ pub struct AgentConfig {
 }
 
 impl AgentConfig {
-    /// Default total per-turn deadline when `turn_timeout_secs` is `None`.
-    pub const DEFAULT_TURN_TIMEOUT_SECS: u32 = 300;
+    /// Default maximum number of provider rounds in one agent loop.
+    pub const DEFAULT_MAX_TURNS: u32 = 32;
+
+    /// Default total per-provider-round deadline when `turn_timeout_secs` is
+    /// `None`.
+    pub const DEFAULT_PROVIDER_ROUND_TIMEOUT_SECS: u32 = 300;
+
+    /// Backward-compatible name for the historical per-round timeout constant.
+    pub const DEFAULT_TURN_TIMEOUT_SECS: u32 = Self::DEFAULT_PROVIDER_ROUND_TIMEOUT_SECS;
 
     pub fn new(model: Model, system_prompt: impl Into<String>) -> Self {
         Self {
             model,
             thinking_level: ThinkingLevel::Off,
             stream_options: StreamOptions::default(),
-            max_turns: 32,
+            max_turns: Self::DEFAULT_MAX_TURNS,
             turn_timeout_secs: None,
             tools: Vec::new(),
             system_prompt: system_prompt.into(),
@@ -273,10 +282,11 @@ impl AgentConfig {
         self
     }
 
-    /// Resolved per-turn deadline in seconds (configured value or the default).
+    /// Resolved per-provider-round deadline in seconds (configured value or the
+    /// default).
     pub fn turn_timeout_secs(&self) -> u32 {
         self.turn_timeout_secs
-            .unwrap_or(Self::DEFAULT_TURN_TIMEOUT_SECS)
+            .unwrap_or(Self::DEFAULT_PROVIDER_ROUND_TIMEOUT_SECS)
     }
 
     pub fn with_turn_timeout_secs(mut self, secs: Option<u32>) -> Self {

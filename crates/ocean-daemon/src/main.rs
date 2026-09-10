@@ -467,6 +467,12 @@ const DEFAULT_MAX_CONCURRENT_TURNS: usize = 24;
 const MAX_CONCURRENT_TURNS: usize =
     extension_lifecycle::MAX_ACTIVE_TERMINAL_AUTHORITIES.saturating_sub(1);
 
+/// Optional deadline for the runtime execution portion of the synchronous
+/// legacy `POST /v1/prompt` handler. It is intentionally unset by default: the
+/// historical handler had no server-side request deadline, and provider/round
+/// limits remain the authoritative safety bounds unless an operator opts in.
+const PROMPT_TIMEOUT_ENV: &str = "OCEAN_PROMPT_TIMEOUT_SECS";
+
 /// Resolve the concurrent-turn ceiling: `OCEAN_MAX_CONCURRENT_TURNS` if set to a
 /// parseable, non-zero `usize`, else [`DEFAULT_MAX_CONCURRENT_TURNS`]. Values
 /// above [`MAX_CONCURRENT_TURNS`] are clamped below lifecycle bookkeeping
@@ -495,6 +501,27 @@ fn max_concurrent_turns() -> usize {
             }
         },
         Err(_) => DEFAULT_MAX_CONCURRENT_TURNS,
+    }
+}
+
+fn prompt_timeout_secs_from_env() -> Option<u64> {
+    parse_positive_secs(env::var(PROMPT_TIMEOUT_ENV).ok().as_deref())
+}
+
+fn parse_positive_secs(raw: Option<&str>) -> Option<u64> {
+    raw?.trim().parse::<u64>().ok().filter(|secs| *secs > 0)
+}
+
+#[cfg(test)]
+mod prompt_timeout_env_tests {
+    use super::*;
+
+    #[test]
+    fn prompt_timeout_env_parser_accepts_positive_seconds_and_keeps_default_unset() {
+        assert_eq!(parse_positive_secs(Some(" 600 ")), Some(600));
+        assert_eq!(parse_positive_secs(Some("0")), None);
+        assert_eq!(parse_positive_secs(Some("garbage")), None);
+        assert_eq!(parse_positive_secs(None), None);
     }
 }
 
@@ -1978,9 +2005,43 @@ async fn prompt(
         req.decision_token.clone(),
     )
     .with_display_title(Some(display_title));
-    let res = match session_lease.as_ref() {
-        Some(lease) => state.runtime.prompt_with_lease(req, control, lease).await,
-        None => state.runtime.prompt(req, control).await,
+    let timeout_session_id = req.session_id;
+    let timeout_cwd = req.cwd.clone();
+    let runtime_prompt = async {
+        match session_lease.as_ref() {
+            Some(lease) => state.runtime.prompt_with_lease(req, control, lease).await,
+            None => state.runtime.prompt(req, control).await,
+        }
+    };
+    let prompt_started = std::time::Instant::now();
+    let (res, handler_timed_out) = match prompt_timeout_secs_from_env() {
+        Some(secs) => {
+            match tokio::time::timeout(std::time::Duration::from_secs(secs), runtime_prompt).await {
+                Ok(res) => (res, false),
+                Err(_) => {
+                    tracing::warn!(
+                        request_id = %request_id,
+                        timeout_secs = secs,
+                        "prompt handler deadline exceeded"
+                    );
+                    (
+                        ocean_core::PromptResponse {
+                            ok: false,
+                            request_id: Some(request_id),
+                            session_id: timeout_session_id,
+                            code: Some(408),
+                            wall_ms: prompt_started.elapsed().as_millis() as u64,
+                            stdout: String::new(),
+                            stderr: format!("prompt exceeded {secs}s timeout"),
+                            cwd: timeout_cwd,
+                            usage: ocean_core::TokenUsage::default(),
+                        },
+                        true,
+                    )
+                }
+            }
+        }
+        None => (runtime_prompt.await, false),
     };
     // Legacy `/v1/prompt` turn: no agent-bus rail, so no agent-bus terminal frame.
     record_prompt_result(&state, request_id, &res, None, None).await;
@@ -1988,7 +2049,14 @@ async fn prompt(
         emit_session_changed(&state.agent_events, AgentSessionId(session_id));
     }
 
-    (StatusCode::OK, Json(res))
+    (
+        if handler_timed_out {
+            StatusCode::REQUEST_TIMEOUT
+        } else {
+            StatusCode::OK
+        },
+        Json(res),
+    )
 }
 
 async fn create_request(

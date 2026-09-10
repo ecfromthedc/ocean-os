@@ -2169,8 +2169,12 @@ impl AgentRuntime {
             system_prompt::build_system_prompt(Some(&req.cwd), req.client_type.as_deref()),
         )
         .with_tools(tools)
-        .with_max_turns(req.max_turns.unwrap_or(32))
-        .with_turn_timeout_secs(turn_timeout_secs_from_env())
+        .with_max_turns(
+            req.max_turns
+                .or_else(agent_max_turns_from_env)
+                .unwrap_or(AgentConfig::DEFAULT_MAX_TURNS),
+        )
+        .with_turn_timeout_secs(provider_round_timeout_secs_from_env())
         .with_permission(permission)
         // Stamp the session onto every runtime AgentEvent so the daemon SSE
         // bridge can route by session natively (OCEAN-54).
@@ -2476,19 +2480,35 @@ fn unwrap_turn_failure(err: anyhow::Error) -> anyhow::Error {
     }
 }
 
-/// Per-turn timeout (seconds) from the environment.
+/// Per-agent-loop maximum rounds from the environment. An explicit request
+/// `max_turns` remains authoritative; this only supplies the daemon default.
+fn agent_max_turns_from_env() -> Option<u32> {
+    parse_positive_u32(std::env::var("OCEAN_AGENT_MAX_TURNS").ok().as_deref())
+}
+
+/// Provider-round timeout (seconds) from the environment.
 ///
-/// Reads `OCEAN_TURN_TIMEOUT_SECS`. Returns `Some(n)` for a valid positive
-/// integer, and `None` when the variable is unset, empty, unparseable, or `0`
-/// — in which case [`AgentConfig`] falls back to
-/// [`AgentConfig::DEFAULT_TURN_TIMEOUT_SECS`] (300s). A `0` is treated as
-/// "unset" rather than "deadline of zero" so a stray value can never make every
-/// turn time out instantly.
-fn turn_timeout_secs_from_env() -> Option<u32> {
-    std::env::var("OCEAN_TURN_TIMEOUT_SECS")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<u32>().ok())
-        .filter(|secs| *secs > 0)
+/// Reads the preferred `OCEAN_PROVIDER_ROUND_TIMEOUT_SECS`, falling back to
+/// the historical `OCEAN_TURN_TIMEOUT_SECS` alias. Returns `Some(n)` for a
+/// valid positive integer, and `None` when both variables are unset, empty,
+/// unparseable, or `0` — in which case [`AgentConfig`] falls back to its 300 s
+/// default. A `0` is treated as "unset" rather than "deadline of zero" so a
+/// stray value can never make every round time out instantly.
+fn provider_round_timeout_secs_from_env() -> Option<u32> {
+    let preferred = std::env::var("OCEAN_PROVIDER_ROUND_TIMEOUT_SECS").ok();
+    let legacy = std::env::var("OCEAN_TURN_TIMEOUT_SECS").ok();
+    provider_round_timeout_secs_from_raw(preferred.as_deref(), legacy.as_deref())
+}
+
+fn provider_round_timeout_secs_from_raw(
+    preferred: Option<&str>,
+    legacy: Option<&str>,
+) -> Option<u32> {
+    parse_positive_u32(preferred).or_else(|| parse_positive_u32(legacy))
+}
+
+fn parse_positive_u32(raw: Option<&str>) -> Option<u32> {
+    raw?.trim().parse::<u32>().ok().filter(|secs| *secs > 0)
 }
 
 #[derive(Clone)]
@@ -6155,6 +6175,32 @@ done
         // A non-TurnFailure passes through untouched.
         let plain = anyhow::anyhow!("plain");
         assert_eq!(unwrap_turn_failure(plain).to_string(), "plain");
+    }
+
+    #[test]
+    fn timeout_and_max_turn_env_parsers_accept_positive_values_and_preserve_defaults() {
+        assert_eq!(
+            provider_round_timeout_secs_from_raw(Some(" 420 "), Some("300")),
+            Some(420)
+        );
+        assert_eq!(
+            provider_round_timeout_secs_from_raw(Some("0"), Some(" 275 ")),
+            Some(275),
+            "the legacy name remains a fallback"
+        );
+        assert_eq!(
+            provider_round_timeout_secs_from_raw(Some("nope"), Some("0")),
+            None
+        );
+        assert_eq!(parse_positive_u32(Some(" 9 ")), Some(9));
+        assert_eq!(parse_positive_u32(Some("0")), None);
+        assert_eq!(parse_positive_u32(Some("-1")), None);
+        assert_eq!(parse_positive_u32(None), None);
+        assert_eq!(
+            AgentConfig::DEFAULT_MAX_TURNS,
+            32,
+            "unset OCEAN_AGENT_MAX_TURNS preserves the existing loop ceiling"
+        );
     }
 
     // The Fake dispatch must also key off the EFFECTIVE state. A Fake global

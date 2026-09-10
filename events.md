@@ -6026,6 +6026,37 @@ remains blocked by ten pre-existing broken local links under the ignored
 untouched.
 
 _________________________________________________________________________________
+time:      [23:30] [09-09-26]
+agent:     [codex], [gpt-5]
+worktree:  fix/glm-messages
+type:      [fix]: Make prompt/provider deadlines operator-configurable
+area:      [backend]: daemon prompt path and provider streaming
+
+Traced the prompt path's timeout boundaries. The legacy `POST /v1/prompt`
+handler had no server-side deadline; the Longhouse advisory consult remains a
+separate fail-open 250 ms bound. Provider streaming has a 10 s connection cap
+and a 120 s between-read stall cap, while the runtime applies a 300 s total
+deadline to each provider round. The agent loop has no overall wall-clock
+deadline: its separate safety bound is the 32-round `max_turns` ceiling. The
+408 signal comes from `AgentError::Timeout` when one provider round exceeds
+300 s; it is surfaced as `PromptResponse.code = 408` (the current legacy
+`/v1/prompt` route otherwise keeps HTTP 200 unless its new handler deadline is
+explicitly enabled). A slow GLM round can therefore trip the per-round cap;
+DeepSeek sessions can complete longer overall when each individual round stays
+under that cap.
+
+Added environment overrides while preserving unset defaults:
+`OCEAN_PROMPT_TIMEOUT_SECS` opts into a synchronous `/v1/prompt` HTTP 408
+deadline; `OCEAN_PROVIDER_ROUND_TIMEOUT_SECS` overrides the 300 s round cap
+(`OCEAN_TURN_TIMEOUT_SECS` remains an alias); `OCEAN_PROVIDER_STALL_SECS`
+overrides the 120 s read-idle cap; `OCEAN_PROVIDER_CONNECT_SECS` overrides the
+10 s connect cap; and `OCEAN_AGENT_MAX_TURNS` supplies the default 32-round
+ceiling without overriding an explicit request value. Added pure parser tests,
+updated crate contracts, and built the daemon release binary. The runtime test
+was not runnable because uncached `bit-set`/`proptest` artifacts require network
+access in this environment; protocol, agent, and daemon parser tests passed.
+
+_________________________________________________________________________________
 time:      [22:18] [09-09-26]
 agent:     [codex], [gpt-5]
 worktree:  fix/glm-messages

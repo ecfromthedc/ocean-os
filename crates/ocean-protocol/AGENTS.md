@@ -53,6 +53,11 @@ This crate owns the multi-provider LLM wire protocol layer for Anthropic, OpenAI
   the standard `{id,type,function}` call shape. This normalization is GLM-only;
   DeepSeek, OpenAI, Kimi, and other compatible routes retain their existing
   wire behavior.
+- Shared streaming clients use a 10-second connection cap and a 120-second
+  between-read stall cap by default. Operators may override them with
+  `OCEAN_PROVIDER_CONNECT_SECS` and `OCEAN_PROVIDER_STALL_SECS`; invalid,
+  empty, or zero values retain the defaults. These are idle/connection limits,
+  not total stream deadlines.
 - `OCEAN_PROMPT_CAPTURE_DIR` is an opt-in local diagnostics path: capture the
   complete serialized JSON body only (never request headers or endpoint URLs),
   warn-and-continue on capture failures, and retain owner-only permissions

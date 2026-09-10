@@ -42,11 +42,21 @@
 
 use std::time::Duration;
 
+/// Environment variable overriding the provider connection-establishment cap.
+pub const ENV_CONNECT_TIMEOUT_SECS: &str = "OCEAN_PROVIDER_CONNECT_SECS";
+/// Environment variable overriding the provider between-read stall cap.
+pub const ENV_STALL_TIMEOUT_SECS: &str = "OCEAN_PROVIDER_STALL_SECS";
+
+/// Default connection-establishment cap in seconds.
+pub const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 10;
+/// Default between-read stall cap in seconds.
+pub const DEFAULT_STALL_TIMEOUT_SECS: u64 = 120;
+
 /// Hard cap on connection establishment (DNS + TCP + TLS handshake).
 ///
 /// Catches the "server accepts the socket then stalls before responding" case
 /// without affecting in-flight streams. Surfaces as `is_connect()` on breach.
-pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS);
 
 /// Idle (between-reads) timeout for streaming responses.
 ///
@@ -54,11 +64,53 @@ pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// stream goes silent for this long. Sized generously so slow-but-alive token
 /// streams (and brief provider-side pauses) are never killed, while a truly
 /// hung connection is detected and retried. Surfaces as `is_timeout()`.
-pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(120);
+pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(DEFAULT_STALL_TIMEOUT_SECS);
 
 /// Idle connections kept warm per host. Mirrors the pre-OCEAN-221 Anthropic
 /// client; applied uniformly so every provider shares one connection policy.
 pub const DEFAULT_POOL_MAX_IDLE_PER_HOST: usize = 4;
+
+/// Streaming-provider transport deadlines resolved from the process environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamingTimeouts {
+    pub connect: Duration,
+    pub stall: Duration,
+}
+
+impl Default for StreamingTimeouts {
+    fn default() -> Self {
+        Self {
+            connect: DEFAULT_CONNECT_TIMEOUT,
+            stall: DEFAULT_READ_TIMEOUT,
+        }
+    }
+}
+
+impl StreamingTimeouts {
+    /// Resolve the operator overrides. Invalid, empty, zero, and absent values
+    /// fall back to the historical defaults.
+    pub fn from_env() -> Self {
+        let connect = std::env::var(ENV_CONNECT_TIMEOUT_SECS).ok();
+        let stall = std::env::var(ENV_STALL_TIMEOUT_SECS).ok();
+        Self::from_raw(connect.as_deref(), stall.as_deref())
+    }
+
+    fn from_raw(connect: Option<&str>, stall: Option<&str>) -> Self {
+        let defaults = Self::default();
+        Self {
+            connect: parse_positive_secs(connect).unwrap_or(defaults.connect),
+            stall: parse_positive_secs(stall).unwrap_or(defaults.stall),
+        }
+    }
+}
+
+fn parse_positive_secs(raw: Option<&str>) -> Option<Duration> {
+    raw?.trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+}
 
 /// Build a `reqwest::Client` configured for **streaming** LLM endpoints.
 ///
@@ -74,9 +126,10 @@ pub fn streaming_client() -> reqwest::Client {
 /// The pre-configured builder behind [`streaming_client`], exposed so a caller
 /// can layer on additional, provider-specific options before building.
 pub fn streaming_client_builder() -> reqwest::ClientBuilder {
+    let timeouts = StreamingTimeouts::from_env();
     reqwest::Client::builder()
-        .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
-        .read_timeout(DEFAULT_READ_TIMEOUT)
+        .connect_timeout(timeouts.connect)
+        .read_timeout(timeouts.stall)
         .pool_max_idle_per_host(DEFAULT_POOL_MAX_IDLE_PER_HOST)
 }
 
@@ -84,6 +137,20 @@ pub fn streaming_client_builder() -> reqwest::ClientBuilder {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn streaming_timeout_env_parser_preserves_defaults_and_accepts_positive_seconds() {
+        let parsed = StreamingTimeouts::from_raw(Some(" 7 "), Some("45"));
+        assert_eq!(parsed.connect, Duration::from_secs(7));
+        assert_eq!(parsed.stall, Duration::from_secs(45));
+
+        let defaults = StreamingTimeouts::from_raw(Some("0"), Some("not-a-duration"));
+        assert_eq!(defaults, StreamingTimeouts::default());
+        assert_eq!(
+            StreamingTimeouts::from_raw(None, None),
+            StreamingTimeouts::default()
+        );
+    }
 
     /// The streaming client must build without panicking with the configured
     /// timeout policy applied. (reqwest exposes no getters for these settings,
