@@ -685,13 +685,17 @@ pub fn known_models() -> Vec<KnownModel> {
         // GET /models 2026-09-10: `deepseek-flash` and `deepseek-v4-pro`; the
         // flash tier was renamed from `deepseek-v4-flash` and the API's 400 now
         // says "The supported API model names are deepseek-flash, deepseek-v4-pro").
+        // `deepseek-flash` is DeepSeek-V4.1-Flash per the pricing page; the same
+        // page says requests to `deepseek-v4-pro` (DeepSeek-V4-Pro-0813) are routed
+        // to V4.1 Flash and billed at the Flash price from 2026-09-14, so the
+        // flash id is the one to run.
         // `deepseek-chat` / `deepseek-reasoner` were advertised here until DeepSeek
         // scheduled them for hard retirement on 2026-07-24 — they, and the old
         // `deepseek-v4-flash` id, stay routable as forward aliases onto
         // `deepseek-flash` in `resolve_model_selection`, but the picker must stop
         // offering models that no longer exist.
         m("deepseek-v4-pro", "deepseek", "DeepSeek V4 Pro"),
-        m("deepseek-flash", "deepseek", "DeepSeek Flash"),
+        m("deepseek-flash", "deepseek", "DeepSeek V4.1 Flash"),
         m("gpt-6-astra", "openai-codex", "GPT-6 Astra (Codex)"),
         m("gpt-5.6-sol", "openai-codex", "GPT-5.6 Sol (Codex)"),
         m("gpt-5.6-terra", "openai-codex", "GPT-5.6 Terra (Codex)"),
