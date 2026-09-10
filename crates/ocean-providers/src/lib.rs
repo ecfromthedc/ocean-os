@@ -682,13 +682,16 @@ pub fn known_models() -> Vec<KnownModel> {
     };
     vec![
         // The live DeepSeek API serves exactly these two (verified against
-        // GET /models 2026-07-12). `deepseek-chat` / `deepseek-reasoner` were
-        // advertised here until DeepSeek scheduled them for hard retirement on
-        // 2026-07-24 — they stay routable as forward aliases onto v4-flash in
-        // `resolve_model_selection`, but the picker must stop offering models that
-        // are about to stop existing.
+        // GET /models 2026-09-10: `deepseek-flash` and `deepseek-v4-pro`; the
+        // flash tier was renamed from `deepseek-v4-flash` and the API's 400 now
+        // says "The supported API model names are deepseek-flash, deepseek-v4-pro").
+        // `deepseek-chat` / `deepseek-reasoner` were advertised here until DeepSeek
+        // scheduled them for hard retirement on 2026-07-24 — they, and the old
+        // `deepseek-v4-flash` id, stay routable as forward aliases onto
+        // `deepseek-flash` in `resolve_model_selection`, but the picker must stop
+        // offering models that no longer exist.
         m("deepseek-v4-pro", "deepseek", "DeepSeek V4 Pro"),
-        m("deepseek-v4-flash", "deepseek", "DeepSeek V4 Flash"),
+        m("deepseek-flash", "deepseek", "DeepSeek Flash"),
         m("gpt-6-astra", "openai-codex", "GPT-6 Astra (Codex)"),
         m("gpt-5.6-sol", "openai-codex", "GPT-5.6 Sol (Codex)"),
         m("gpt-5.6-terra", "openai-codex", "GPT-5.6 Terra (Codex)"),
@@ -823,10 +826,16 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
         // resolve FORWARD onto v4-flash, keeping pinned sessions alive across the
         // cutover — the same pattern the retired Claude 4-6/4-7 ids use. They are
         // dropped from `known_models()` so the picker stops advertising them.
-        "deepseek-chat" | "deepseek-reasoner" | "deepseek-r1" | "deepseek-v4-flash" => {
+        // 2026-09-10: DeepSeek renamed the flash tier `deepseek-v4-flash` ->
+        // `deepseek-flash` (GET /models serves exactly deepseek-flash and
+        // deepseek-v4-pro); the old id still answers today but is an alias, so it
+        // resolves forward too. `deepseek-pro-flash` is the operator's spoken
+        // name for the same model.
+        "deepseek-flash" | "deepseek-pro-flash" | "deepseek-chat" | "deepseek-reasoner"
+        | "deepseek-r1" | "deepseek-v4-flash" => {
             Ok(model_selection(
                 ProviderId::DeepSeek,
-                "deepseek-v4-flash",
+                "deepseek-flash",
                 DEEPSEEK_BASE_URL,
                 DEEPSEEK_CONTEXT_WINDOW,
                 DEEPSEEK_MAX_OUTPUT_TOKENS,
@@ -1560,11 +1569,11 @@ mod tests {
     }
 
     #[test]
-    fn maps_deepseek_v4_flash_to_deepseek_provider() {
+    fn maps_deepseek_flash_to_deepseek_provider() {
         let selection =
-            resolve_model_selection(&env(&[("OCEAN_MODEL", "deepseek-v4-flash")])).unwrap();
+            resolve_model_selection(&env(&[("OCEAN_MODEL", "deepseek-flash")])).unwrap();
         assert_eq!(selection.provider, ProviderId::DeepSeek);
-        assert_eq!(selection.model, "deepseek-v4-flash");
+        assert_eq!(selection.model, "deepseek-flash");
         assert_eq!(selection.base_url, DEEPSEEK_BASE_URL);
     }
 
@@ -1573,12 +1582,18 @@ mod tests {
     // dies mid-conversation. They must therefore resolve FORWARD onto the model
     // that actually exists, not pass through as themselves.
     #[test]
-    fn retiring_deepseek_aliases_resolve_forward_onto_v4_flash() {
-        for legacy in ["deepseek-chat", "deepseek-reasoner", "deepseek-r1"] {
+    fn retiring_deepseek_aliases_resolve_forward_onto_flash() {
+        for legacy in [
+            "deepseek-chat",
+            "deepseek-reasoner",
+            "deepseek-r1",
+            "deepseek-v4-flash",
+            "deepseek-pro-flash",
+        ] {
             let selection = resolve_model_selection(&env(&[("OCEAN_MODEL", legacy)])).unwrap();
             assert_eq!(
-                selection.model, "deepseek-v4-flash",
-                "{legacy:?} must forward onto a model that still exists after 2026-07-24"
+                selection.model, "deepseek-flash",
+                "{legacy:?} must forward onto a model that still exists at the API (2026-09-10: deepseek-flash)"
             );
             assert_eq!(selection.provider, ProviderId::DeepSeek);
         }
@@ -2036,8 +2051,9 @@ mod tests {
             // `deepseek-chat` / `deepseek-reasoner` are absent for the same reason
             // the retired Claude 4-6/4-7 ids are: DeepSeek retires them 2026-07-24,
             // so they stay ROUTABLE as forward aliases onto v4-flash (pinned
-            // sessions survive the cutover) but must not be in the menu.
-            "deepseek-v4-flash",
+            // sessions survive the cutover) but must not be in the menu; the same
+            // goes for the pre-2026-09-10 `deepseek-v4-flash` id.
+            "deepseek-flash",
             "deepseek-v4-pro",
             "gpt-4o",
             "gpt-4o-mini",
