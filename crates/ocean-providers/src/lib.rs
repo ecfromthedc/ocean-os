@@ -682,13 +682,21 @@ pub fn known_models() -> Vec<KnownModel> {
     };
     vec![
         // The live DeepSeek API serves exactly these two (verified against
-        // GET /models 2026-07-12). `deepseek-chat` / `deepseek-reasoner` were
-        // advertised here until DeepSeek scheduled them for hard retirement on
-        // 2026-07-24 — they stay routable as forward aliases onto v4-flash in
-        // `resolve_model_selection`, but the picker must stop offering models that
-        // are about to stop existing.
+        // GET /models 2026-09-10: `deepseek-flash` and `deepseek-v4-pro`; the
+        // flash tier was renamed from `deepseek-v4-flash` and the API's 400 now
+        // says "The supported API model names are deepseek-flash, deepseek-v4-pro").
+        // `deepseek-flash` is DeepSeek-V4.1-Flash per the pricing page; the same
+        // page says requests to `deepseek-v4-pro` (DeepSeek-V4-Pro-0813) are routed
+        // to V4.1 Flash and billed at the Flash price from 2026-09-14, so the
+        // flash id is the one to run.
+        // `deepseek-chat` / `deepseek-reasoner` were advertised here until DeepSeek
+        // scheduled them for hard retirement on 2026-07-24 — they, and the old
+        // `deepseek-v4-flash` id, stay routable as forward aliases onto
+        // `deepseek-flash` in `resolve_model_selection`, but the picker must stop
+        // offering models that no longer exist.
         m("deepseek-v4-pro", "deepseek", "DeepSeek V4 Pro"),
-        m("deepseek-v4-flash", "deepseek", "DeepSeek V4 Flash"),
+        m("deepseek-flash", "deepseek", "DeepSeek V4.1 Flash"),
+        m("gpt-6-astra", "openai-codex", "GPT-6 Astra (Codex)"),
         m("gpt-5.6-sol", "openai-codex", "GPT-5.6 Sol (Codex)"),
         m("gpt-5.6-terra", "openai-codex", "GPT-5.6 Terra (Codex)"),
         m("gpt-5.6-luna", "openai-codex", "GPT-5.6 Luna (Codex)"),
@@ -711,6 +719,11 @@ pub fn known_models() -> Vec<KnownModel> {
         m("claude-sonnet-5", "claude-code", "Claude Sonnet 5"),
         m("claude-haiku-4-5", "claude-code", "Claude Haiku 4.5"),
         m("claude-code-fable-5", "claude-code", "Claude Code Fable 5"),
+        m(
+            "claude-code-fable-5-1",
+            "claude-code",
+            "Claude Code Fable 5.1",
+        ),
         // MiniMax ids use the API casing the resolver returns as current.model
         // (`MiniMax-M2`, not the lowercase alias), so `id == current.model`
         // holds for every entry — ACP/Zed match the selected mode id against the
@@ -722,6 +735,8 @@ pub fn known_models() -> Vec<KnownModel> {
         m("kimi-k3", "kimi", "Kimi K3"),
         m("kimi-k2.6", "kimi", "Kimi K2.6"),
         m("kimi-k2", "kimi", "Kimi K2"),
+        m("glm-5.3", "glm", "GLM 5.3"),
+        m("glm-5.3-flash", "glm", "GLM 5.3 Flash"),
         m("glm-5.2", "glm", "GLM 5.2"),
         m("glm-4.7", "glm", "GLM 4.7"),
         m("glm-4.6", "glm", "GLM 4.6"),
@@ -815,15 +830,19 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
         // resolve FORWARD onto v4-flash, keeping pinned sessions alive across the
         // cutover — the same pattern the retired Claude 4-6/4-7 ids use. They are
         // dropped from `known_models()` so the picker stops advertising them.
-        "deepseek-chat" | "deepseek-reasoner" | "deepseek-r1" | "deepseek-v4-flash" => {
-            Ok(model_selection(
-                ProviderId::DeepSeek,
-                "deepseek-v4-flash",
-                DEEPSEEK_BASE_URL,
-                DEEPSEEK_CONTEXT_WINDOW,
-                DEEPSEEK_MAX_OUTPUT_TOKENS,
-            ))
-        }
+        // 2026-09-10: DeepSeek renamed the flash tier `deepseek-v4-flash` ->
+        // `deepseek-flash` (GET /models serves exactly deepseek-flash and
+        // deepseek-v4-pro); the old id still answers today but is an alias, so it
+        // resolves forward too. `deepseek-pro-flash` is the operator's spoken
+        // name for the same model.
+        "deepseek-flash" | "deepseek-pro-flash" | "deepseek-chat" | "deepseek-reasoner"
+        | "deepseek-r1" | "deepseek-v4-flash" => Ok(model_selection(
+            ProviderId::DeepSeek,
+            "deepseek-flash",
+            DEEPSEEK_BASE_URL,
+            DEEPSEEK_CONTEXT_WINDOW,
+            DEEPSEEK_MAX_OUTPUT_TOKENS,
+        )),
         "deepseek" | "deepseek-v4-pro" | "deepseek-v4" | "deepseek-pro" | "v4-pro" => {
             Ok(model_selection(
                 ProviderId::DeepSeek,
@@ -846,6 +865,13 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
             OPENAI_BASE_URL,
             128_000,
             16_384,
+        )),
+        "gpt-6-astra" => Ok(model_selection(
+            ProviderId::OpenAiCodex,
+            "gpt-6-astra",
+            CODEX_BASE_URL,
+            1_050_000,
+            128_000,
         )),
         "gpt-5.6-sol" | "gpt-5-6-sol" => Ok(model_selection(
             ProviderId::OpenAiCodex,
@@ -964,6 +990,15 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
                 16_384,
             ))
         }
+        // Fable 5.1 — current point release. The plain wire id must resolve
+        // because pinned sessions replay it; `fable` stays on 5.0.
+        "claude-code-fable-5-1" | "claude-fable-5-1" => Ok(model_selection(
+            ProviderId::ClaudeCode,
+            "claude-code-fable-5-1",
+            ANTHROPIC_BASE_URL,
+            200_000,
+            16_384,
+        )),
         "claude-code-opus-5" | "claude-code-opus" | "cc-opus" => Ok(model_selection(
             ProviderId::ClaudeCode,
             "claude-code-opus-5",
@@ -1080,6 +1115,20 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
         "glm-5.2" | "glm-5-2" => Ok(model_selection(
             ProviderId::Glm,
             "glm-5.2",
+            glm_base_url(env),
+            200_000,
+            8_192,
+        )),
+        "glm-5.3" | "glm-5-3" => Ok(model_selection(
+            ProviderId::Glm,
+            "glm-5.3",
+            glm_base_url(env),
+            200_000,
+            8_192,
+        )),
+        "glm-5.3-flash" | "glm-5-3-flash" => Ok(model_selection(
+            ProviderId::Glm,
+            "glm-5.3-flash",
             glm_base_url(env),
             200_000,
             8_192,
@@ -1522,11 +1571,11 @@ mod tests {
     }
 
     #[test]
-    fn maps_deepseek_v4_flash_to_deepseek_provider() {
+    fn maps_deepseek_flash_to_deepseek_provider() {
         let selection =
-            resolve_model_selection(&env(&[("OCEAN_MODEL", "deepseek-v4-flash")])).unwrap();
+            resolve_model_selection(&env(&[("OCEAN_MODEL", "deepseek-flash")])).unwrap();
         assert_eq!(selection.provider, ProviderId::DeepSeek);
-        assert_eq!(selection.model, "deepseek-v4-flash");
+        assert_eq!(selection.model, "deepseek-flash");
         assert_eq!(selection.base_url, DEEPSEEK_BASE_URL);
     }
 
@@ -1535,12 +1584,18 @@ mod tests {
     // dies mid-conversation. They must therefore resolve FORWARD onto the model
     // that actually exists, not pass through as themselves.
     #[test]
-    fn retiring_deepseek_aliases_resolve_forward_onto_v4_flash() {
-        for legacy in ["deepseek-chat", "deepseek-reasoner", "deepseek-r1"] {
+    fn retiring_deepseek_aliases_resolve_forward_onto_flash() {
+        for legacy in [
+            "deepseek-chat",
+            "deepseek-reasoner",
+            "deepseek-r1",
+            "deepseek-v4-flash",
+            "deepseek-pro-flash",
+        ] {
             let selection = resolve_model_selection(&env(&[("OCEAN_MODEL", legacy)])).unwrap();
             assert_eq!(
-                selection.model, "deepseek-v4-flash",
-                "{legacy:?} must forward onto a model that still exists after 2026-07-24"
+                selection.model, "deepseek-flash",
+                "{legacy:?} must forward onto a model that still exists at the API (2026-09-10: deepseek-flash)"
             );
             assert_eq!(selection.provider, ProviderId::DeepSeek);
         }
@@ -1998,11 +2053,13 @@ mod tests {
             // `deepseek-chat` / `deepseek-reasoner` are absent for the same reason
             // the retired Claude 4-6/4-7 ids are: DeepSeek retires them 2026-07-24,
             // so they stay ROUTABLE as forward aliases onto v4-flash (pinned
-            // sessions survive the cutover) but must not be in the menu.
-            "deepseek-v4-flash",
+            // sessions survive the cutover) but must not be in the menu; the same
+            // goes for the pre-2026-09-10 `deepseek-v4-flash` id.
+            "deepseek-flash",
             "deepseek-v4-pro",
             "gpt-4o",
             "gpt-4o-mini",
+            "gpt-6-astra",
             "gpt-5.6-sol",
             "gpt-5.6-terra",
             "gpt-5.6-luna",
@@ -2018,6 +2075,7 @@ mod tests {
             "claude-sonnet-5",
             "claude-haiku-4-5",
             "claude-code-fable-5",
+            "claude-code-fable-5-1",
             // API-cased ids: `resolve_model_selection` returns these as
             // current.model, and known_models() advertises the same string.
             "MiniMax-M2",
@@ -2026,6 +2084,8 @@ mod tests {
             "kimi-k3",
             "kimi-k2.6",
             "kimi-k2",
+            "glm-5.3",
+            "glm-5.3-flash",
             "glm-5.2",
             "glm-4.7",
             "glm-4.6",

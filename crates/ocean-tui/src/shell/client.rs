@@ -1135,8 +1135,7 @@ impl DaemonClient {
                             if parse_sse_event(&frame) != Some("room_message") {
                                 continue;
                             }
-                            if let Some(message) =
-                                parse_sse_data::<ocean_core::RoomMessage>(&frame)
+                            if let Some(message) = parse_sse_data::<ocean_core::RoomMessage>(&frame)
                             {
                                 let _ = actions.send(Action::BoardRoomMessage {
                                     generation,

@@ -396,6 +396,10 @@ fn search_dynamic_tools(
 pub struct AgentRun {
     pub messages: Vec<Message>,
     pub stopped_at_turn_limit: bool,
+    /// Stable operator-facing reason for the terminal state of this run.
+    /// This is deliberately separate from the provider's `StopReason`: it also
+    /// covers Ocean-owned boundaries such as the max-round synthesis path.
+    pub stop_reason: String,
     /// Real provider token usage, summed across every round of the turn.
     /// `Usage::default()` (all zero) when the provider reported none.
     /// Provider-reported total context consumption for the final provider round.
@@ -474,6 +478,7 @@ pub async fn run_agent_with_history(
     let mut session_allowed: HashSet<String> = HashSet::new();
     let mut turn: u32 = 0;
     let mut stopped_at_turn_limit = false;
+    let mut stop_reason = "completed".to_string();
     let mut total_usage = ocean_protocol::Usage::default();
     let mut latest_context_tokens = 0;
     // Completed-round durability cursor. Checkpoints carry only the transcript
@@ -728,6 +733,13 @@ pub async fn run_agent_with_history(
                         && !attempt_emitted
                         && is_transient_stream_error(&e);
                     if !retryable {
+                        tracing::warn!(
+                            round = turn,
+                            attempt,
+                            streamed_output = attempt_emitted,
+                            error = %e,
+                            "provider round failed; ending agent run"
+                        );
                         return Err(e);
                     }
                     // Exponential backoff (500ms, 1s, …), racing the cancel token
@@ -809,6 +821,22 @@ pub async fn run_agent_with_history(
             // on resume. See OCEAN-103.
             for (id, name, _args) in &tool_calls {
                 messages.push(truncated_tool_use_result(id, name));
+            }
+            if final_answer_round {
+                // The max-round synthesis produced a real reply, so this run
+                // did NOT stop at the turn limit (the fallback below is the
+                // turn-limit stop). The operator-facing reason still names the
+                // boundary that forced the synthesis.
+                stop_reason = "max_turns".into();
+            } else {
+                stop_reason = match stop {
+                    StopReason::Stop => "completed",
+                    StopReason::Length => "provider_length",
+                    StopReason::Error => "provider_error",
+                    StopReason::Aborted => "cancelled",
+                    StopReason::ToolUse => "provider_tool_use_without_calls",
+                }
+                .into();
             }
             emit(
                 &events,
@@ -1120,12 +1148,14 @@ pub async fn run_agent_with_history(
         );
         emit_turn_checkpoint(&events, &sid, &messages, &mut checkpointed_messages);
         if any_terminate {
+            stop_reason = "tool_terminated".into();
             break;
         }
     }
 
     if turn >= config.max_turns && matches!(messages.last(), Some(Message::ToolResult(_))) {
         stopped_at_turn_limit = true;
+        stop_reason = "max_turns".into();
         let reply = tool_limit_fallback_reply(&messages);
         emit(
             &events,
@@ -1157,6 +1187,7 @@ pub async fn run_agent_with_history(
     Ok(AgentRun {
         messages,
         stopped_at_turn_limit,
+        stop_reason,
         usage: total_usage,
         context_tokens: latest_context_tokens,
     })
@@ -1608,7 +1639,9 @@ fn estimate_tokens_json<T: serde::Serialize>(value: &T) -> usize {
 /// quadratically with no ceiling, regardless of the model's actual window. We
 /// keep the newest contiguous suffix of messages that fits the input budget
 /// (`context_window − max_tokens − system-prompt − margin`), always preserving
-/// at least the final message (the current user prompt).
+/// at least the final message and one user message when the history contains
+/// one. The latter matters for long tool loops: the live request may end in a
+/// `ToolResult`, while GLM rejects a replay containing no user role at all.
 ///
 /// Tool-call/tool-result pairing: a `ToolResult` is only valid to a provider if
 /// the assistant `ToolCall` it answers is also present. Since we keep a suffix,
@@ -1709,6 +1742,22 @@ pub fn trim_to_context_window(
             .find(|m| !matches!(m, Message::ToolResult(_)))
         {
             out.push(msg.clone());
+        }
+    }
+
+    // A long tool loop can trim the only original user message out of the
+    // newest suffix because every intervening round is assistant/tool history.
+    // Keep that real user prompt as a soft-budget exception; provider adapters
+    // such as GLM require at least one user message to make the request legal.
+    if !out
+        .iter()
+        .any(|message| matches!(message, Message::User { .. }))
+    {
+        if let Some(user) = messages
+            .iter()
+            .find(|message| matches!(message, Message::User { .. }))
+        {
+            out.insert(0, user.clone());
         }
     }
 
@@ -2145,6 +2194,7 @@ mod tests {
             .await
             .expect("run should finish");
 
+        assert_eq!(run.stop_reason, "completed");
         assert!(matches!(run.messages.last(), Some(Message::Assistant(a))
             if a.content.iter().any(|c| c.as_text() == Some("final answer after tool result"))));
 
@@ -2205,6 +2255,40 @@ mod tests {
         // The most recent message is preserved.
         assert!(matches!(kept.last(), Some(Message::User { content, .. })
             if content.iter().any(|c| c.as_text() == Some(last_text.as_str()))));
+    }
+
+    #[test]
+    fn trim_preserves_a_user_message_through_a_long_tool_loop() {
+        let mut messages = vec![user("the original task")];
+        for index in 0..40 {
+            messages.push(Message::Assistant(AssistantMessage {
+                content: vec![
+                    Content::text("planning ".repeat(200)),
+                    Content::ToolCall {
+                        id: format!("call-{index}"),
+                        name: "read".into(),
+                        arguments: serde_json::json!({"path": "STATUS.md"}),
+                    },
+                ],
+                api: "openai-completions".into(),
+                provider: "glm".into(),
+                model: "glm-5.3-flash".into(),
+                usage: Usage::default(),
+                stop_reason: StopReason::ToolUse,
+                error_message: None,
+                timestamp: 0,
+            }));
+            messages.push(tool_result(
+                &format!("call-{index}"),
+                &"result ".repeat(200),
+            ));
+        }
+        let kept = trim_to_context_window(&messages, "sys", 8_000, 1_000);
+        assert!(
+            kept.iter()
+                .any(|message| matches!(message, Message::User { .. })),
+            "a trimmed GLM tool history must retain one real user message"
+        );
     }
 
     #[test]

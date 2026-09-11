@@ -117,9 +117,7 @@ pub async fn ensure_fresh(auth_file: &Path) {
         return;
     }
     let Ok(mut guard) = state().try_lock() else {
-        tracing::debug!(
-            "OAuth refresh already in flight; proceeding with on-disk credentials"
-        );
+        tracing::debug!("OAuth refresh already in flight; proceeding with on-disk credentials");
         return;
     };
 

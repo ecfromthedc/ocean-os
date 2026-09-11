@@ -15,6 +15,9 @@ This crate owns shared protocol types used across Ocean clients, daemon, runtime
 - Treat public type changes as cross-crate contract changes.
 - Preserve serde compatibility unless the breaking change is intentional and documented.
 - Keep protocol types free of daemon/runtime implementation details.
+- `PromptResponse` is a stable terminal envelope: `ok`, integer `code`,
+  `stdout`, and `stop_reason` always serialize. Older payloads default missing
+  `code` to `0` and missing `stop_reason` to `unknown`.
 - Session synchronization uses a bounded `SessionSyncSnapshot` plus opaque
   boot-local `SessionEventFence`; it excludes raw messages, tool rows/payloads,
   thinking, and image metadata, caps visible user/assistant text at 512 rows and

@@ -384,10 +384,19 @@ mod tests {
 
     #[test]
     fn board_is_registered_and_boa_ranks_it_first() {
-        assert!(is_command("/board"), "/board should be a live slash command");
+        assert!(
+            is_command("/board"),
+            "/board should be a live slash command"
+        );
         let ranked = filter("boa");
-        assert_eq!(ranked[0].0.name, "/board", "\"boa\" should rank /board first");
-        assert!(!ranked[0].0.soon, "/board is live, not a roadmap placeholder");
+        assert_eq!(
+            ranked[0].0.name, "/board",
+            "\"boa\" should rank /board first"
+        );
+        assert!(
+            !ranked[0].0.soon,
+            "/board is live, not a roadmap placeholder"
+        );
     }
 
     #[test]
