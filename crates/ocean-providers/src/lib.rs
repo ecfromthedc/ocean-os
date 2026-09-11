@@ -836,15 +836,13 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
         // resolves forward too. `deepseek-pro-flash` is the operator's spoken
         // name for the same model.
         "deepseek-flash" | "deepseek-pro-flash" | "deepseek-chat" | "deepseek-reasoner"
-        | "deepseek-r1" | "deepseek-v4-flash" => {
-            Ok(model_selection(
-                ProviderId::DeepSeek,
-                "deepseek-flash",
-                DEEPSEEK_BASE_URL,
-                DEEPSEEK_CONTEXT_WINDOW,
-                DEEPSEEK_MAX_OUTPUT_TOKENS,
-            ))
-        }
+        | "deepseek-r1" | "deepseek-v4-flash" => Ok(model_selection(
+            ProviderId::DeepSeek,
+            "deepseek-flash",
+            DEEPSEEK_BASE_URL,
+            DEEPSEEK_CONTEXT_WINDOW,
+            DEEPSEEK_MAX_OUTPUT_TOKENS,
+        )),
         "deepseek" | "deepseek-v4-pro" | "deepseek-v4" | "deepseek-pro" | "v4-pro" => {
             Ok(model_selection(
                 ProviderId::DeepSeek,

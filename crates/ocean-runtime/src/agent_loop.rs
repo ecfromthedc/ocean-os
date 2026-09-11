@@ -1749,7 +1749,10 @@ pub fn trim_to_context_window(
     // newest suffix because every intervening round is assistant/tool history.
     // Keep that real user prompt as a soft-budget exception; provider adapters
     // such as GLM require at least one user message to make the request legal.
-    if !out.iter().any(|message| matches!(message, Message::User { .. })) {
+    if !out
+        .iter()
+        .any(|message| matches!(message, Message::User { .. }))
+    {
         if let Some(user) = messages
             .iter()
             .find(|message| matches!(message, Message::User { .. }))
@@ -2275,11 +2278,15 @@ mod tests {
                 error_message: None,
                 timestamp: 0,
             }));
-            messages.push(tool_result(&format!("call-{index}"), &"result ".repeat(200)));
+            messages.push(tool_result(
+                &format!("call-{index}"),
+                &"result ".repeat(200),
+            ));
         }
         let kept = trim_to_context_window(&messages, "sys", 8_000, 1_000);
         assert!(
-            kept.iter().any(|message| matches!(message, Message::User { .. })),
+            kept.iter()
+                .any(|message| matches!(message, Message::User { .. })),
             "a trimmed GLM tool history must retain one real user message"
         );
     }

@@ -196,8 +196,8 @@ use model_roles::resolve_effective_model_id;
 use model_roles::{load_model_roles, resolve_advisor_alias, resolve_turn_model};
 use persistent_rooms::{
     resolve_named_agent, room_board, room_create, room_create_invite, room_db_path, room_events,
-    room_get, room_join, room_leave, room_post_message, room_redeem_invite,
-    room_register_agents, room_retry_outbox, room_snapshot, room_transcript, rooms_list_persistent,
+    room_get, room_join, room_leave, room_post_message, room_redeem_invite, room_register_agents,
+    room_retry_outbox, room_snapshot, room_transcript, rooms_list_persistent,
     run_federated_trigger_dispatcher, with_rooms, with_rooms_handle, RoomAccessWakeBus,
     RoomStoreHandle, RoomWakeBus,
 };
@@ -6912,11 +6912,11 @@ async fn agent_turn_admission(
         // P2: record turn outcome on the session so operators can distinguish
         // a thinking agent from one whose last turn died silently. Best-effort
         // (a failing session-write must not kill the terminal TurnFinished).
-        if let Err(e) = bg_state.runtime.record_turn_completed_with_lease(
-            &session_lease,
-            res.ok,
-            &res.stderr,
-        ) {
+        if let Err(e) =
+            bg_state
+                .runtime
+                .record_turn_completed_with_lease(&session_lease, res.ok, &res.stderr)
+        {
             tracing::warn!(%session_id, error = %e, "agent_turn: failed to record turn outcome on session");
         }
         // Wait for the bridge to drain (the sender has been dropped by now).

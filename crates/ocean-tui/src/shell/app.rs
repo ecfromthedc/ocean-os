@@ -43,10 +43,10 @@ use super::{
     client::{DaemonClient, ModelEntry, TurnSubmitError},
     component::Component,
     components::{
+        board::BoardComponent,
         chat::{sanitize_line, ChatComponent},
         editor::EditorComponent,
         file_tree::FileTreeComponent,
-        board::BoardComponent,
         graph::GraphComponent,
         pty_pane::PtyComponent,
         session_rail::SessionRailComponent,
@@ -1894,7 +1894,10 @@ impl App {
                     rows,
                     last_seq,
                 },
-                Err(message) => Action::BoardOpFailed { generation, message },
+                Err(message) => Action::BoardOpFailed {
+                    generation,
+                    message,
+                },
             };
             let _ = tx.send(action);
         });
@@ -2819,7 +2822,10 @@ impl App {
                     let _ = tx.send(Action::BoardPostFinished { generation, result });
                 });
             }
-            Action::BoardOpFailed { generation, message } => {
+            Action::BoardOpFailed {
+                generation,
+                message,
+            } => {
                 if *generation == self.board_generation {
                     // Stay honest: back to chat, board keeps its error state.
                     self.center = Center::Chat;

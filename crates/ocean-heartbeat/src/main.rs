@@ -292,9 +292,7 @@ async fn wake_once(daemon_url: &str, args: WakeArgs) -> Result<i32> {
     // await silently cancels the turn (the request future is dropped before
     // `tokio::spawn`). Default to a generous 300s and let operators override
     // via OCEAN_HEARTBEAT_TIMEOUT_SECS.
-    let client = reqwest::Client::builder()
-        .timeout(ack_timeout())
-        .build()?;
+    let client = reqwest::Client::builder().timeout(ack_timeout()).build()?;
     let base = daemon_url.trim_end_matches('/');
     let health = format!("{base}/health");
     if let Err(e) = client
@@ -584,7 +582,11 @@ fn levenshtein(a: &str, b: &str) -> usize {
     for i in 1..=n {
         curr[0] = i;
         for j in 1..=m {
-            let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
+            let cost = if a_chars[i - 1] == b_chars[j - 1] {
+                0
+            } else {
+                1
+            };
             curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
@@ -930,6 +932,9 @@ mod tests {
     #[test]
     fn nearest_model_short_typo() {
         let candidates = &["gpt-5.6-sol", "gpt-4o", "k3"];
-        assert_eq!(nearest_model("gpt-5.6-sol", candidates), Some("gpt-5.6-sol"));
+        assert_eq!(
+            nearest_model("gpt-5.6-sol", candidates),
+            Some("gpt-5.6-sol")
+        );
     }
 }

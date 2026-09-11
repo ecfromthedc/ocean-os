@@ -498,12 +498,10 @@ fn normalize_glm_messages(messages: &mut Vec<Value>) {
     // fallback at the final wire boundary as well. Normal turns retain their
     // real user prompt; this is only for an already-trimmed or externally
     // reconstructed history.
-    if !messages.iter().any(|message| {
-        message
-            .get("role")
-            .and_then(Value::as_str)
-            == Some("user")
-    }) {
+    if !messages
+        .iter()
+        .any(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+    {
         messages.push(json!({
             "role": "user",
             "content": "Continue from the preceding context."
@@ -1879,7 +1877,9 @@ mod tests {
             .find(|message| message["role"] == "user")
             .expect("GLM history must contain a user message");
         assert_eq!(user["content"], "Continue from the preceding context.");
-        assert!(user["content"].as_str().is_some_and(|text| !text.is_empty()));
+        assert!(user["content"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()));
     }
 
     // OCEAN-131: tool-result image parity. OpenAI's `role:tool` message can only

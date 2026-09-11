@@ -87,7 +87,8 @@ pub struct BoardComponent {
     room_key: Option<String>,
     generation: u64,
     rows: Vec<BoardRow>,
-    board: Board,    loading: bool,
+    board: Board,
+    loading: bool,
     tail_gap: bool,
     error: Option<String>,
     /// Selected column index into `display_columns()` (board columns plus an
@@ -212,16 +213,13 @@ impl BoardComponent {
             ));
         }
         let card = self.selected_card()?;
-        let target = (self.col as isize + delta).clamp(0, self.board.columns.len() as isize - 1)
-            as usize;
+        let target =
+            (self.col as isize + delta).clamp(0, self.board.columns.len() as isize - 1) as usize;
         let column = self.board.columns.get(target)?.clone();
         if column == card.column {
             return None;
         }
-        self.post(CardEnvelope::new(
-            card.id.clone(),
-            CardOp::Move { column },
-        ))
+        self.post(CardEnvelope::new(card.id.clone(), CardOp::Move { column }))
     }
 
     /// Encode and emit a card op. Encode errors surface inline and never post.
@@ -248,7 +246,9 @@ impl BoardComponent {
             ),
             InputKind::Retitle { card_id } => CardEnvelope::new(
                 card_id.clone(),
-                CardOp::Retitle { title: text.clone() },
+                CardOp::Retitle {
+                    title: text.clone(),
+                },
             ),
             InputKind::Assign { card_id } => CardEnvelope::new(
                 card_id.clone(),
@@ -260,10 +260,9 @@ impl BoardComponent {
                     },
                 },
             ),
-            InputKind::Comment { card_id } => CardEnvelope::new(
-                card_id.clone(),
-                CardOp::Comment { text: text.clone() },
-            ),
+            InputKind::Comment { card_id } => {
+                CardEnvelope::new(card_id.clone(), CardOp::Comment { text: text.clone() })
+            }
         };
         match envelope.encode() {
             Ok(body) => {
@@ -422,9 +421,10 @@ impl Component for BoardComponent {
                 self.tail_gap = false;
                 self.refold();
             }
-            Action::BoardRoomMessage { generation, message }
-                if *generation == self.generation && !self.loading =>
-            {
+            Action::BoardRoomMessage {
+                generation,
+                message,
+            } if *generation == self.generation && !self.loading => {
                 self.rows.push(BoardRow::from_message(message));
                 self.tail_gap = false;
                 self.refold();
@@ -432,9 +432,7 @@ impl Component for BoardComponent {
             Action::BoardStreamGap { generation } if *generation == self.generation => {
                 self.tail_gap = true;
             }
-            Action::BoardPostFinished { generation, result }
-                if *generation == self.generation =>
-            {
+            Action::BoardPostFinished { generation, result } if *generation == self.generation => {
                 match result {
                     Ok(()) => self.pending_draft = None,
                     Err(error) => {
@@ -445,9 +443,10 @@ impl Component for BoardComponent {
                     }
                 }
             }
-            Action::BoardOpFailed { generation, message }
-                if *generation == self.generation =>
-            {
+            Action::BoardOpFailed {
+                generation,
+                message,
+            } if *generation == self.generation => {
                 self.loading = false;
                 self.error = Some(message.clone());
             }
@@ -504,7 +503,9 @@ impl Component for BoardComponent {
                     " · {} card event(s) from a newer schema not shown",
                     self.board.unsupported_events
                 ),
-                Style::default().fg(theme::YELLOW).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme::YELLOW)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
         frame.render_widget(Paragraph::new(Line::from(header)), chunks[0]);
@@ -514,7 +515,10 @@ impl Component for BoardComponent {
         if !columns.is_empty() {
             let col_areas = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints(vec![Constraint::Ratio(1, columns.len() as u32); columns.len()])
+                .constraints(vec![
+                    Constraint::Ratio(1, columns.len() as u32);
+                    columns.len()
+                ])
                 .split(chunks[1]);
             let detail_open = self.detail && self.selected_card().is_some();
             for (index, name) in columns.iter().enumerate() {
@@ -694,7 +698,16 @@ mod tests {
                     },
                 ),
             ),
-            row(3, "ec", CardEnvelope::new(card_a, CardOp::Move { column: "doing".into() })),
+            row(
+                3,
+                "ec",
+                CardEnvelope::new(
+                    card_a,
+                    CardOp::Move {
+                        column: "doing".into(),
+                    },
+                ),
+            ),
         ];
         let tail = vec![
             row(
@@ -711,7 +724,12 @@ mod tests {
             row(
                 5,
                 "deepseek",
-                CardEnvelope::new(card_a, CardOp::Comment { text: "lgtm".into() }),
+                CardEnvelope::new(
+                    card_a,
+                    CardOp::Comment {
+                        text: "lgtm".into(),
+                    },
+                ),
             ),
             row(6, "ec", CardEnvelope::new(card_a, CardOp::Close)),
             chat(7, "fable", "nice board"),
@@ -768,9 +786,14 @@ mod tests {
         let pending = BoardRow {
             clock: EventClock::Pending(7),
             author_id: "ec".into(),
-            body: CardEnvelope::new(card, CardOp::Move { column: "done".into() })
-                .encode()
-                .unwrap(),
+            body: CardEnvelope::new(
+                card,
+                CardOp::Move {
+                    column: "done".into(),
+                },
+            )
+            .encode()
+            .unwrap(),
         };
         let confirmed = row(
             5,
