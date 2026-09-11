@@ -823,7 +823,10 @@ pub async fn run_agent_with_history(
                 messages.push(truncated_tool_use_result(id, name));
             }
             if final_answer_round {
-                stopped_at_turn_limit = true;
+                // The max-round synthesis produced a real reply, so this run
+                // did NOT stop at the turn limit (the fallback below is the
+                // turn-limit stop). The operator-facing reason still names the
+                // boundary that forced the synthesis.
                 stop_reason = "max_turns".into();
             } else {
                 stop_reason = match stop {
