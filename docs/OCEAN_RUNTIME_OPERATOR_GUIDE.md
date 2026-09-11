@@ -552,6 +552,7 @@ POST   /v1/permissions/{id}/decision      allow/deny a mutating-tool request
 GET    /v1/rooms/persistent               list persistent rooms
 POST   /v1/rooms/persistent               create a room { key, name, trigger_policy? }
 GET    /v1/rooms/persistent/{key}         room + transcript
+GET    /v1/rooms/persistent/{key}/board                  team manager board projection: columns in display order, cards keyed by card_id, unsupported_events counter
 POST   /v1/rooms/persistent/{key}/participants            join { id, display_name, kind? }
 DELETE /v1/rooms/persistent/{key}/participants/{participant_id}  leave
 POST   /v1/rooms/persistent/{key}/messages                post message { author_id, author_kind?, body }

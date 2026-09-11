@@ -24993,7 +24993,7 @@ mod tests {
         );
         assert_eq!(
             banner.len(),
-            95,
+            96,
             "route baseline changed; review the manifest"
         );
 
