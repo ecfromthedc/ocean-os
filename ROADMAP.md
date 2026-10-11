@@ -152,6 +152,10 @@ outside the Cargo graph in a dedicated `ocean-webkit` repository.
       Tauri embedding, signed helper packaging, and build/size/memory measurements.
 - [ ] Earn per-domain CDP parity with generated conformance tests; ship the
       usable browser at the manifest's ship gate rather than protocol completeness.
+- [ ] *(Proposed, not accepted)* Learned site operations: teach a site once,
+      replay it over plain HTTP — see
+      [`docs/specs/2026-10-10-learned-site-operations-proposal.md`](docs/specs/2026-10-10-learned-site-operations-proposal.md).
+      A first client for the capture-with-bodies gate; it adds no browser tool.
 
 ## Harness evolution
 

@@ -82,6 +82,8 @@ Proposals awaiting operator ruling:
 
 - [`specs/2026-07-19-cross-device-approval-and-attention.md`](specs/2026-07-19-cross-device-approval-and-attention.md) — phased design for permission-block notifications, a daemon-wide "Needs you" attention surface, and Web Push background reach, building on the 2026-07-19 `/web` `/desk` `/beam` session-handoff fabric. Phase 1 (notify on block) is accepted and implemented in `ocean-surface-ui`; Phases 2–3 remain proposed.
 
+- [`specs/2026-10-10-learned-site-operations-proposal.md`](specs/2026-10-10-learned-site-operations-proposal.md) — PROPOSED 2026-10-10, not accepted. Learned site operations: teach a site once from a recorded page (HAR today, the legacy recorder or OceanWebKit later), save a parameterized request template, and replay it over plain HTTP with extraction, failure classes and proven-before-saved repair. It is a non-default `ocean-siteops` crate plus a permission-gated plugin. It is read-only and logged-out in v1, never launches a browser itself, and leaves the 19 browser tools and `web_fetch` unchanged. First consumers are creator research and the North Star fan wall. It includes a phase plan, effort estimates, and five yes/no questions. It authorizes nothing.
+
 Active implementation reference:
 
 - [`specs/2026-08-14-session-model-pin-provenance.md`](specs/2026-08-14-session-model-pin-provenance.md) — operator-approved session-authority contract using the monotonic config revision to replace model/global equality inference, including revision-zero legacy fallback and live Stitchpad rollout gates.

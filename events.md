@@ -11640,3 +11640,12 @@ area:      [review]
 
 Parent PR #532 merged as 7236a41c, whose entire tree matches original parent 177a6cbf. Reconciled origin/main ancestry into the capability branch; squash-induced protocol conflicts retain the already-integrated tested files. The resolved index is byte-identical to prior 4a327a7e before this ledger append, so the 3,719-test repository gate and prior strict validations still cover the unchanged code. Retarget PR #533 to main and obtain fresh hosted review/checks on the merge head. Devlog pass: owner contracts and child indexes unchanged because no code, ownership or workflow contract changed; canonical dirty checkout preserved.
 _________________________________________________________________________________ 15:41 codex/ocean-effort-catalog-20261005
+
+time:      [21:20] [10-10-26]
+agent:     [claude-code], [claude-opus-5-5]
+worktree:  docs/learned-site-operations-plan
+type:      [plan]: Learned site operations proposal
+area:      [docs]
+
+Added docs/specs/2026-10-10-learned-site-operations-proposal.md (PROPOSED, authorizes nothing). It plans a Rust reimplementation of the ideas in goodnight000/api-anything (MIT): learn a parameterized request template from two recorded page loads, replay it over plain HTTP, extract fields, classify failures, and save repairs only after a proven replay. Placement is a non-default ocean-siteops crate plus a permission-gated plugin; the learner reads HAR so it needs no browser now, with a legacy-chromium recorder and OceanWebKit as later capture sources. It is read-only and logged-out in v1, has its own egress guard, and leaves the 19 browser tools and web_fetch unchanged. Consumers are creator research (TikTok median views) and the North Star fan wall, the latter within that repo's no-unattended-session-scraping rules. Registered in docs/README.md proposals and as a proposed ROADMAP item under Ocean Browser. Devlog pass: no code, ownership or crate index changed, so owner contracts and child indexes are unchanged.
+_________________________________________________________________________________ 21:20 docs/learned-site-operations-plan
