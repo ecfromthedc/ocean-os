@@ -3749,7 +3749,8 @@ fn model_from_provider_config(config: &ProviderConfig) -> anyhow::Result<Model> 
             selection.context_window,
             selection.max_output_tokens,
         )),
-        ProviderId::KimiCoding => Ok(Model::kimi_coding_k3(
+        ProviderId::KimiCoding => Ok(Model::kimi_coding(
+            selection.model.clone(),
             selection.base_url.clone(),
             selection.context_window,
             selection.max_output_tokens,

@@ -288,9 +288,27 @@ impl Model {
         context_window: u32,
         max_tokens: u32,
     ) -> Self {
+        Self::kimi_coding("k3", base_url, context_window, max_tokens)
+    }
+
+    /// Any Kimi coding-plan model id (`k3`, `k3.1-pro`, `k3.1-pro-highspeed`)
+    /// on the same Anthropic Messages wire. K3.1 refuses requests with
+    /// thinking off, which `build_body` enforces.
+    pub fn kimi_coding(
+        id: impl Into<String>,
+        base_url: impl Into<String>,
+        context_window: u32,
+        max_tokens: u32,
+    ) -> Self {
+        let id = id.into();
+        let name = match id.as_str() {
+            "k3.1-pro" => "Kimi K3.1 Pro (coding plan)",
+            "k3.1-pro-highspeed" => "Kimi K3.1 Pro Highspeed (coding plan)",
+            _ => "Kimi K3 (coding plan)",
+        };
         Self {
-            id: "k3".into(),
-            name: "Kimi K3 (coding plan)".into(),
+            id,
+            name: name.into(),
             api: "anthropic-messages".into(),
             provider: "kimi-coding".into(),
             base_url: base_url.into(),

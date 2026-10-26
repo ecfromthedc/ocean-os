@@ -774,6 +774,8 @@ fn model_reasoning_efforts(id: &str, provider: &str) -> Vec<String> {
         ("minimax", "MiniMax-M3") => &["off", "high"],
         ("kimi", "kimi-k3") => &["max"],
         ("kimi-coding", "k3") => &["off", "minimal", "low", "medium", "high", "max"],
+        // K3.1 rejects thinking off; max is the plan's default.
+        ("kimi-coding", "k3.1-pro" | "k3.1-pro-highspeed") => &["max"],
         ("google", "gemini-3.1-pro-preview" | "gemini-3.8-flash") => &["low", "medium", "high"],
         ("google", id) if id.starts_with("gemini-3.") => &["minimal", "low", "medium", "high"],
         ("google", _) => &[],
@@ -874,6 +876,8 @@ pub fn known_models() -> Vec<KnownModel> {
         m("MiniMax-M2.7", "minimax", "MiniMax M2.7"),
         m("MiniMax-M2", "minimax", "MiniMax M2"),
         m("k3", "kimi-coding", "Kimi K3 (coding plan)"),
+        m("k3.1-pro", "kimi-coding", "Kimi K3.1 Pro (coding plan)"),
+        m("k3.1-pro-highspeed", "kimi-coding", "Kimi K3.1 Pro Highspeed (coding plan)"),
         m("kimi-k3", "kimi", "Kimi K3"),
         m("kimi-k2.6", "kimi", "Kimi K2.6"),
         m("kimi-k2", "kimi", "Kimi K2"),
@@ -1282,6 +1286,22 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
             "k3",
             KIMI_CODING_BASE_URL,
             KIMI_K3_CONTEXT_WINDOW,
+            131_072,
+        )),
+        // K3.1 Pro (2026-10-23) on the same coding plan. 262k is the context
+        // every paid tier gets; higher tiers allow more, so stay at the floor.
+        "k3.1-pro" | "k3.1" | "kimi-coding-k3.1-pro" => Ok(model_selection(
+            ProviderId::KimiCoding,
+            "k3.1-pro",
+            KIMI_CODING_BASE_URL,
+            262_144,
+            131_072,
+        )),
+        "k3.1-pro-highspeed" | "k3.1-highspeed" => Ok(model_selection(
+            ProviderId::KimiCoding,
+            "k3.1-pro-highspeed",
+            KIMI_CODING_BASE_URL,
+            262_144,
             131_072,
         )),
         "kimi-k3" => Ok(model_selection(
@@ -2418,6 +2438,16 @@ mod tests {
             assert_eq!(sel.model, "k3", "alias {alias}");
             assert_eq!(sel.base_url, "https://api.kimi.com/coding", "alias {alias}");
         }
+        for (alias, id) in [
+            ("k3.1-pro", "k3.1-pro"),
+            ("k3.1", "k3.1-pro"),
+            ("k3.1-pro-highspeed", "k3.1-pro-highspeed"),
+        ] {
+            let sel = resolve_model_selection(&env(&[("OCEAN_MODEL", alias)])).unwrap();
+            assert_eq!(sel.provider, ProviderId::KimiCoding, "alias {alias}");
+            assert_eq!(sel.model, id, "alias {alias}");
+            assert_eq!(sel.base_url, "https://api.kimi.com/coding", "alias {alias}");
+        }
         // The raw metered path stays on Moonshot, unchanged.
         let raw = resolve_model_selection(&env(&[("OCEAN_MODEL", "kimi-k3")])).unwrap();
         assert_eq!(raw.provider, ProviderId::Kimi);
@@ -2510,6 +2540,8 @@ mod tests {
         );
         assert_eq!(efforts("gemini-3.8-flash"), ["low", "medium", "high"]);
         assert_eq!(efforts("kimi-k3"), ["max"]);
+        assert_eq!(efforts("k3.1-pro"), ["max"]);
+        assert_eq!(efforts("k3.1-pro-highspeed"), ["max"]);
         assert_eq!(
             efforts("k3"),
             ["off", "minimal", "low", "medium", "high", "max"]
@@ -2622,6 +2654,8 @@ mod tests {
             "MiniMax-M2",
             "MiniMax-M2.7",
             "k3",
+            "k3.1-pro",
+            "k3.1-pro-highspeed",
             "kimi-k3",
             "kimi-k2.6",
             "kimi-k2",

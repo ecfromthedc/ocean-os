@@ -426,7 +426,13 @@ fn build_body(model: &Model, context: &Context, options: &StreamOptions) -> Valu
         if let Some(t) = options.temperature {
             body["temperature"] = json!(t);
         }
-        if let Some(level) = options.reasoning {
+        // Kimi K3.1 on the coding plan rejects a request without thinking.
+        let must_think = model.provider == "kimi-coding" && model.id.starts_with("k3.1");
+        let reasoning = match options.reasoning {
+            None | Some(ThinkingLevel::Off) if must_think => Some(ThinkingLevel::Max),
+            other => other,
+        };
+        if let Some(level) = reasoning {
             if let Some(budget) = thinking_budget(level) {
                 if max_tokens > 1024 {
                     let budget = budget.min(max_tokens - 1);
@@ -906,6 +912,28 @@ mod tests {
                 None => assert!(body.get("thinking").is_none()),
             }
         }
+    }
+    #[test]
+    fn kimi_k3_1_always_sends_thinking() {
+        for id in ["k3.1-pro", "k3.1-pro-highspeed"] {
+            let model = Model::kimi_coding(id, "https://api.kimi.com/coding", 262_144, 131_072);
+            for reasoning in [None, Some(ThinkingLevel::Off), Some(ThinkingLevel::Max)] {
+                let options = StreamOptions {
+                    reasoning,
+                    ..Default::default()
+                };
+                let body = build_body(&model, &Context::default(), &options);
+                assert_eq!(body["model"], id);
+                assert_eq!(body["thinking"]["type"], "enabled", "{id} {reasoning:?}");
+            }
+        }
+        // K3 keeps its off switch.
+        let k3 = Model::kimi_coding_k3("https://api.kimi.com/coding", 262_144, 32_768);
+        let off = StreamOptions {
+            reasoning: Some(ThinkingLevel::Off),
+            ..Default::default()
+        };
+        assert!(build_body(&k3, &Context::default(), &off).get("thinking").is_none());
     }
     #[test]
     fn haiku_high_thinking_budget_stays_below_max_tokens() {
