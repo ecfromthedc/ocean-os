@@ -151,6 +151,9 @@ impl Default for AnthropicProvider {
     }
 }
 
+/// Sent in place of a tool result that produced no output.
+const EMPTY_TOOL_OUTPUT: &str = "(no output)";
+
 fn convert_messages(messages: &[Message]) -> Vec<Value> {
     let mut out = Vec::with_capacity(messages.len());
     for m in messages {
@@ -176,8 +179,11 @@ fn convert_messages(messages: &[Message]) -> Vec<Value> {
             }
             Message::ToolResult(tr) => {
                 // Empty text blocks are invalid INSIDE tool_result content
-                // too, so filter them; a tool that produced no output omits
-                // `content` entirely (the field is optional for tool_result).
+                // too, so filter them. A tool that produced no output (an
+                // empty directory listing, a grep with no matches) sends a
+                // short placeholder: Anthropic accepts a tool_result without
+                // `content`, but Kimi's Anthropic-compatible endpoint answers
+                // 400 invalid_request_error for one.
                 let body: Vec<Value> = tr
                     .content
                     .iter()
@@ -197,9 +203,11 @@ fn convert_messages(messages: &[Message]) -> Vec<Value> {
                     "tool_use_id": tr.tool_call_id,
                     "is_error": tr.is_error,
                 });
-                if !body.is_empty() {
-                    result["content"] = json!(body);
-                }
+                result["content"] = if body.is_empty() {
+                    json!([{"type": "text", "text": EMPTY_TOOL_OUTPUT}])
+                } else {
+                    json!(body)
+                };
                 out.push(json!({"role": "user", "content": [result]}));
             }
         }
@@ -978,7 +986,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_tool_result_text_is_filtered_and_content_omitted() {
+    fn empty_tool_result_text_is_replaced_by_a_placeholder() {
         let messages = vec![Message::ToolResult(crate::types::ToolResultMessage {
             tool_call_id: "toolu_1".into(),
             tool_name: "bash".into(),
@@ -991,9 +999,10 @@ mod tests {
         let result = &out[0]["content"][0];
         assert_eq!(result["type"], "tool_result");
         assert_eq!(result["tool_use_id"], "toolu_1");
-        assert!(
-            result.get("content").is_none(),
-            "empty tool output must omit content, not send an empty text block: {result}"
+        assert_eq!(
+            result["content"],
+            json!([{"type": "text", "text": "(no output)"}]),
+            "empty tool output must send a placeholder, never an empty text block or no content: {result}"
         );
     }
 
