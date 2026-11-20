@@ -12,6 +12,7 @@ This crate owns the multi-provider LLM wire protocol layer for Anthropic, OpenAI
 
 ## Local Contracts
 
+- Ollama and llama.cpp reuse OpenAI chat-completions streaming and accept keyless requests. Never inherit OpenAI credentials on these routes.
 - Keep provider-specific behavior isolated behind protocol abstractions.
 - Do not leak provider quirks into shared `ocean-core` types unless the shared contract intentionally changes.
 - Treat streaming event shape changes as compatibility-sensitive.

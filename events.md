@@ -6097,3 +6097,20 @@ backward-compatible response serialization test. `cargo build -p ocean-daemon
 --release` completed; the full protocol/agent suites are blocked only by the
 sandbox's loopback-listener permission in OAuth tests. Runtime tests remain
 offline-blocked by uncached `proptest` artifacts.
+
+---
+
+time:      [13:05] [20-11-26]
+agent:     [Codex]
+worktree:  codex/local-model-providers
+type:      [feature-request]: Route local inference through Ocean sessions
+area:      [backend]
+
+Added keyless Ollama and llama.cpp provider routes using the existing streamed
+Chat Completions adapter. Configured models appear in the picker and can be
+pinned per session. The Studio quick-chat pilot uses these same session paths.
+Local provider failures cannot trigger hosted fallback.
+
+Validated both Studio routes with two streamed turns, a persisted model pin,
+and transcript recall. Workspace check and 415 provider, protocol, and agent
+library tests passed.

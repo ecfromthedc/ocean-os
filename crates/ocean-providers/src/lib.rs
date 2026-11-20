@@ -84,6 +84,8 @@ pub enum ProviderId {
     /// Google Generative AI (Gemini family; v1beta generativelanguage API).
     Google,
     OpenAiCompatible,
+    Ollama,
+    LlamaCpp,
     Fake,
 }
 
@@ -101,6 +103,8 @@ impl ProviderId {
             Self::Glm => "glm",
             Self::Google => "google",
             Self::OpenAiCompatible => "openai-compatible",
+            Self::Ollama => "ollama",
+            Self::LlamaCpp => "llama-cpp",
             Self::Fake => "fake",
         }
     }
@@ -132,13 +136,48 @@ impl ProviderId {
             // only GEMINI_API_KEY fails preflight ("missing credential") and
             // Gemini is silently unroutable even though the provider could auth.
             Self::Google => &["OCEAN_GOOGLE_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"],
-            Self::Fake => &[],
+            Self::Ollama | Self::LlamaCpp | Self::Fake => &[],
         }
     }
 
     pub fn requires_credential(&self) -> bool {
-        !matches!(self, Self::Fake)
+        !matches!(self, Self::Ollama | Self::LlamaCpp | Self::Fake)
     }
+}
+
+const LOCAL_PROVIDERS: [(ProviderId, &str, &str, &str); 2] = [
+    (
+        ProviderId::Ollama,
+        "OCEAN_OLLAMA_MODELS",
+        "OCEAN_OLLAMA_BASE_URL",
+        "http://127.0.0.1:11434/v1",
+    ),
+    (
+        ProviderId::LlamaCpp,
+        "OCEAN_LLAMA_CPP_MODELS",
+        "OCEAN_LLAMA_CPP_BASE_URL",
+        "http://127.0.0.1:8080/v1",
+    ),
+];
+
+/// Local model catalogs are operator-configured because each server serves
+/// different models. Keep the provider in the id so a saved pin is unambiguous.
+pub fn configured_local_models(env: &ProviderEnv) -> Vec<KnownModel> {
+    LOCAL_PROVIDERS
+        .iter()
+        .flat_map(|(provider, models_var, _, _)| {
+            env.get(models_var)
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .map(|model| KnownModel {
+                    id: format!("{}/{model}", provider.as_str()),
+                    provider: provider.as_str().into(),
+                    label: format!("{model} ({})", provider.as_str()),
+                })
+        })
+        .collect()
 }
 
 /// Source label for a resolved credential. Never contains the credential value.
@@ -506,6 +545,11 @@ pub fn fallback_candidates(
     env: &ProviderEnv,
     exclude_provider: &ProviderId,
 ) -> Vec<ProviderConfig> {
+    // Local inference can carry private session history. A local outage
+    // must never redirect that history to an implicit hosted fallback.
+    if matches!(exclude_provider, ProviderId::Ollama | ProviderId::LlamaCpp) {
+        return Vec::new();
+    }
     let mut out: Vec<ProviderConfig> = Vec::new();
     for alias in fallback_order(env) {
         // Resolve this alias as if it were the selected model: same env, so the
@@ -774,6 +818,7 @@ pub fn known_models_with_readiness(env: &ProviderEnv) -> Vec<ReadyModel> {
     let mut by_provider: BTreeMap<String, (bool, Option<CredentialSource>)> = BTreeMap::new();
     known_models()
         .into_iter()
+        .chain(configured_local_models(env))
         .map(|m| {
             let (ready, credential_source) = by_provider
                 .entry(m.provider.clone())
@@ -813,6 +858,37 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
     let Some(chosen) = chosen else {
         return Err(ProviderConfigError::NoModelSelected);
     };
+    let (prefix, local_model) = chosen.split_once('/').unwrap_or(("", chosen));
+    let qualified = LOCAL_PROVIDERS
+        .iter()
+        .find(|(provider, _, _, _)| provider.as_str() == prefix);
+    let explicit = env.get("OCEAN_PROVIDER").map(str::trim);
+    let local = qualified.or_else(|| {
+        LOCAL_PROVIDERS
+            .iter()
+            .find(|(provider, _, _, _)| Some(provider.as_str()) == explicit)
+    });
+    if let Some((provider, _, base_url_var, default_url)) = local {
+        let provider_name = provider.as_str();
+        let model = if qualified.is_some() {
+            local_model.trim()
+        } else {
+            chosen
+        };
+        if model.is_empty() {
+            return Err(ProviderConfigError::NoModelSelected);
+        }
+        return Ok(model_selection(
+            provider.clone(),
+            format!("{provider_name}/{model}"),
+            env.get(base_url_var)
+                .map(str::trim)
+                .filter(|url| !url.is_empty())
+                .unwrap_or(default_url),
+            16_384,
+            2_048,
+        ));
+    }
     let model = normalize_model_id(chosen);
     let provider_override = env.get("OCEAN_PROVIDER").map(str::trim);
 
@@ -1996,6 +2072,39 @@ mod tests {
         let raw = resolve_model_selection(&env(&[("OCEAN_MODEL", "kimi-k3")])).unwrap();
         assert_eq!(raw.provider, ProviderId::Kimi);
         assert_eq!(raw.base_url, "https://api.moonshot.ai/v1");
+    }
+
+    #[test]
+    fn configured_local_models_round_trip_without_cloud_credentials() {
+        let mut env = env(&[
+            ("OCEAN_PROVIDER", "ollama"),
+            ("OCEAN_OLLAMA_MODELS", " hf.co/Owner/Model:Q4_K_M, ,"),
+            ("OCEAN_LLAMA_CPP_MODELS", "Seat_C"),
+            ("OCEAN_LLAMA_CPP_BASE_URL", "http://127.0.0.1:8103/v1"),
+            ("OPENAI_API_KEY", "cloud-key"),
+        ]);
+        let models = configured_local_models(&env);
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "ollama/hf.co/Owner/Model:Q4_K_M");
+        assert_eq!(models[1].id, "llama-cpp/Seat_C");
+        for (model, url) in models
+            .iter()
+            .zip(["http://127.0.0.1:11434/v1", "http://127.0.0.1:8103/v1"])
+        {
+            env.vars.insert("OCEAN_MODEL".into(), model.id.clone());
+            let config = resolve_provider_config(&env).unwrap();
+            assert_eq!(config.selection.model, model.id);
+            assert_eq!(config.selection.provider.as_str(), model.provider);
+            assert_eq!(config.selection.base_url, url);
+            assert!(config.readiness().ok);
+            assert!(config.credential.is_none());
+            assert!(fallback_candidates(&env, &config.selection.provider).is_empty());
+        }
+        env.vars.insert("OCEAN_MODEL".into(), "Model:Q4_K_M".into());
+        assert_eq!(
+            resolve_model_selection(&env).unwrap().model,
+            "ollama/Model:Q4_K_M"
+        );
     }
 
     #[test]

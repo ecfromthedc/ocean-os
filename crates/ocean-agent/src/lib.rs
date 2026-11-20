@@ -21,7 +21,8 @@ use ocean_providers::{
 // the daemon can serve a picker without taking a direct ocean-providers
 // dependency.
 pub use ocean_providers::{
-    known_models, known_models_with_readiness, KnownModel, ProviderEnv, ReadyModel,
+    configured_local_models, known_models, known_models_with_readiness, KnownModel, ProviderEnv,
+    ReadyModel,
 };
 use ocean_runtime::{
     run_agent_with_history, AgentConfig, AgentError, AgentEvent, BuiltinProvider,
@@ -3289,7 +3290,7 @@ fn state_from_provider_config(provider_config: ProviderConfig) -> anyhow::Result
     let backend_name = format!(
         "{}/{}",
         provider_config.selection.provider.as_str(),
-        provider_config.selection.model,
+        model.id,
     );
     Ok(RuntimeState {
         model,
@@ -3302,6 +3303,20 @@ fn state_from_provider_config(provider_config: ProviderConfig) -> anyhow::Result
 fn model_from_provider_config(config: &ProviderConfig) -> anyhow::Result<Model> {
     let selection = &config.selection;
     match selection.provider {
+        ProviderId::Ollama | ProviderId::LlamaCpp => {
+            let provider = selection.provider.as_str();
+            let (_, model) = selection
+                .model
+                .split_once('/')
+                .ok_or_else(|| anyhow::anyhow!("missing provider prefix in {}", selection.model))?;
+            Ok(Model::openai_compat(
+                provider,
+                model,
+                selection.base_url.clone(),
+                selection.context_window,
+                selection.max_output_tokens,
+            ))
+        }
         ProviderId::DeepSeek
         | ProviderId::OpenAiCompatible
         | ProviderId::MiniMax
@@ -3594,6 +3609,8 @@ fn should_strip_assistant_thinking(provider: &ProviderId, model: &str) -> bool {
         ProviderId::DeepSeek
             | ProviderId::OpenAi
             | ProviderId::OpenAiCompatible
+            | ProviderId::Ollama
+            | ProviderId::LlamaCpp
             | ProviderId::MiniMax
     ) || (*provider == ProviderId::Kimi && model != "kimi-k3")
 }

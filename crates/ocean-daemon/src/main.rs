@@ -7966,14 +7966,14 @@ async fn agent_session_config_patch(
         );
     };
     let requested = req.model.trim();
-    let Some(known) = ocean_agent::known_models()
+    let models: Vec<_> = ocean_agent::known_models()
         .into_iter()
-        .find(|m| m.id == requested)
-    else {
-        let valid: Vec<String> = ocean_agent::known_models()
-            .into_iter()
-            .map(|m| m.id)
-            .collect();
+        .chain(ocean_agent::configured_local_models(
+            &ocean_agent::ProviderEnv::from_process(),
+        ))
+        .collect();
+    let Some(known) = models.iter().find(|m| m.id == requested) else {
+        let valid: Vec<String> = models.into_iter().map(|m| m.id).collect();
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({

@@ -1,5 +1,39 @@
 # Ocean OS — Ops
 
+## Local model sessions
+
+Configure local models in the **Ocean daemon** environment. Each list takes
+comma-separated backend model names, including tags. The two servers use
+OpenAI-compatible Chat Completions streaming. Ocean stores provider-qualified
+IDs in the normal session config and owns the conversation history and tool
+permissions. Local provider failures stay in that session without hosted
+failover. These routes use a 16,384-token context budget and a 2,048-token
+output cap in Ocean.
+
+| Provider | Picker model list | Base URL override | Default base URL |
+|---|---|---|---|
+| Ollama | `OCEAN_OLLAMA_MODELS` | `OCEAN_OLLAMA_BASE_URL` | `http://127.0.0.1:11434/v1` |
+| llama.cpp | `OCEAN_LLAMA_CPP_MODELS` | `OCEAN_LLAMA_CPP_BASE_URL` | `http://127.0.0.1:8080/v1` |
+
+### Studio pilot
+
+For the Studio's quick interactive workflow (previously
+`ollama run mimo-v2.6:9b-nvfp4`), start a fresh Ocean session and select
+`ollama/mimo-v2.6:9b-nvfp4`. For the equivalent llama.cpp workflow, select
+`llama-cpp/seatC` in another session. The Studio's existing llama.cpp service
+for that seat listens on port 8103. The daemon configuration for both is:
+
+```sh
+export OCEAN_OLLAMA_MODELS=mimo-v2.6:9b-nvfp4
+export OCEAN_LLAMA_CPP_MODELS=seatC
+export OCEAN_LLAMA_CPP_BASE_URL=http://127.0.0.1:8103/v1
+```
+
+Check `ollama ps` before and after a one-off run. When you finish, unload a
+model you loaded for the one-off with `ollama stop <model>` only if nobody
+else is using it and it has no scheduled workload. Leave the Studio's
+always-on llama.cpp seat running.
+
 ## ocean-daemon is supervised by launchd (OCEAN-253)
 
 The **daemon** (`crates/ocean-daemon`, built to `target/release/ocean-daemon`) is

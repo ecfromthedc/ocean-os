@@ -12,6 +12,7 @@ This crate owns the long-running Ocean HTTP service on `:4780`, including API ro
 
 ## Local Contracts
 
+- Session model pins accept the same configured local model IDs that the daemon advertises in the picker.
 - Daemon health is `GET /health`, not `/v1/health`.
 - Restart the daemon only by specific PID; do not use blind `pkill` sweeps.
 - HTTP turn routes must resolve effective cwd from client cwd/project metadata and must never fall back to daemon process cwd.
