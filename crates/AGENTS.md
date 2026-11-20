@@ -104,6 +104,7 @@ The workspace currently contains 31 Rust packages.
 - Prefer small, explicit package boundaries.
 - Run the narrowest package check first, then the root completion/merge gate.
 - Session/history changes usually cross `ocean-agent`, `ocean-core`, and `ocean-daemon`; coordinate explicitly.
+- Local inference routes use provider-qualified IDs (for example, `ollama/model:tag`) and add operator-configured entries to the picker. See [the local-provider pilot](../ops/README.md#local-model-sessions).
 - Public picker models are owned by `ocean-providers::known_models`; every advertised id must round-trip through `resolve_model_selection`, and every routable production alias must be listed. Kimi K3 is the exact `kimi-k3` route with a 1M context window; its provider-specific dynamic-tool wire belongs to `ocean-protocol`, while bounded search/dispatch enforcement belongs to `ocean-runtime`.
 
 ## Verification

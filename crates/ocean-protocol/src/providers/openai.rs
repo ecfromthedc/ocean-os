@@ -900,14 +900,17 @@ fn resolve_api_key(
     provider: &str,
     explicit: Option<&str>,
     openai_env: Option<String>,
-) -> Result<String> {
+) -> Result<Option<String>> {
     if let Some(key) = explicit {
-        return Ok(key.to_string());
+        return Ok(Some(key.to_string()));
     }
     if provider == "openai" {
         if let Some(key) = openai_env {
-            return Ok(key);
+            return Ok(Some(key));
         }
+    }
+    if matches!(provider, "ollama" | "llama-cpp") {
+        return Ok(None);
     }
     Err(Error::MissingApiKey(provider.to_string()))
 }
@@ -951,9 +954,11 @@ impl Provider for OpenAiProvider {
             async move {
                 let mut req = client
                     .post(&url)
-                    .bearer_auth(&api_key)
                     .header("accept", "text/event-stream")
                     .header("content-type", "application/json");
+                if let Some(api_key) = api_key {
+                    req = req.bearer_auth(api_key);
+                }
                 for (k, v) in extra_headers {
                     req = req.header(k, v);
                 }
@@ -2709,14 +2714,24 @@ mod tests {
     }
 
     #[test]
+    fn local_backends_do_not_require_or_inherit_an_openai_key() {
+        for provider in ["ollama", "llama-cpp"] {
+            assert_eq!(
+                resolve_api_key(provider, None, Some("sk-openai-secret".into())).unwrap(),
+                None
+            );
+        }
+    }
+
+    #[test]
     fn openai_env_key_still_serves_a_real_openai_turn() {
         let key = resolve_api_key("openai", None, Some("sk-openai-secret".into()))
             .expect("openai must still accept the env fallback");
-        assert_eq!(key, "sk-openai-secret");
+        assert_eq!(key.as_deref(), Some("sk-openai-secret"));
         // An explicitly resolved key always wins, whatever the backend.
         let key = resolve_api_key("deepseek", Some("sk-deepseek"), Some("sk-openai".into()))
             .expect("explicit key must be used");
-        assert_eq!(key, "sk-deepseek");
+        assert_eq!(key.as_deref(), Some("sk-deepseek"));
     }
 
     // OpenAI has no thinking toggle — Off there stays an omission.

@@ -12,6 +12,7 @@ This crate owns Ocean's agent session/history layer and project prompt loading. 
 
 ## Local Contracts
 
+- Preserve the qualified local-provider ID in session pins and the last-used model. Strip the provider prefix only when constructing the backend wire model.
 - Preserve session compatibility unless a migration is documented.
 - Session-config model pins update model/provider together under the same
   per-session lock as turn persistence. Optional config reads must distinguish
