@@ -712,7 +712,7 @@ fn apply_reasoning(body: &mut Value, model: &Model, level: ThinkingLevel) {
             body["thinking"] =
                 json!({"type": if level == ThinkingLevel::Off { "disabled" } else { "adaptive" }});
         }
-        "glm" if matches!(model.id.as_str(), "glm-5.3" | "glm-5.3-flash") => {
+        "glm" if matches!(model.id.as_str(), "glm-5.4" | "glm-5.3" | "glm-5.3-flash") => {
             body["thinking"] = json!({"type": "enabled"});
             body["reasoning_effort"] = json!(match level {
                 ThinkingLevel::Off | ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
