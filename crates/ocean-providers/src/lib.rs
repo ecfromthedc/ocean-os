@@ -3397,6 +3397,13 @@ mod model_refresh_tests {
     }
     #[test]
     fn glm54_resolves_on_both_paths_and_is_in_the_picker() {
+        let env = |vars: &[(&str, &str)]| ProviderEnv {
+            vars: vars
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+            ..Default::default()
+        };
         for id in ["glm-5.4", "glm-5-4"] {
             let sel = resolve_model_selection(&env(&[("OCEAN_MODEL", id)])).unwrap();
             assert_eq!(sel.provider, ProviderId::Glm, "{id}");
