@@ -3719,7 +3719,9 @@ fn model_from_provider_config(config: &ProviderConfig) -> anyhow::Result<Model> 
                 model.supports_images = true;
                 model.reasoning = true;
             }
-            if selection.provider == ProviderId::Glm && selection.model.starts_with("glm-5.3") {
+            if selection.provider == ProviderId::Glm
+                && (selection.model.starts_with("glm-5.3") || selection.model == "glm-5.4")
+            {
                 model.reasoning = true;
             }
             Ok(model)

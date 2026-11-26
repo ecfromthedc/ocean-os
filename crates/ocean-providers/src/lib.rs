@@ -769,7 +769,7 @@ fn model_reasoning_efforts(id: &str, provider: &str) -> Vec<String> {
         ) => &["low", "medium", "high", "xhigh", "max"],
         ("claude-code" | "anthropic", _) => &["off", "minimal", "low", "medium", "high"],
         ("deepseek", _) => &["off", "high", "max"],
-        ("glm", "glm-5.3" | "glm-5.3-flash") => &["low", "high", "max"],
+        ("glm", "glm-5.4" | "glm-5.3" | "glm-5.3-flash") => &["low", "high", "max"],
         ("minimax", "MiniMax-M3.1-Flash-Preview") => &["low", "medium", "high", "xhigh"],
         ("minimax", "MiniMax-M3") => &["off", "high"],
         ("kimi", "kimi-k3") => &["max"],
@@ -877,6 +877,7 @@ pub fn known_models() -> Vec<KnownModel> {
         m("kimi-k3", "kimi", "Kimi K3"),
         m("kimi-k2.6", "kimi", "Kimi K2.6"),
         m("kimi-k2", "kimi", "Kimi K2"),
+        m("glm-5.4", "glm", "GLM 5.4"),
         m("glm-5.3", "glm", "GLM 5.3"),
         m("glm-5.3-flash", "glm", "GLM 5.3 Flash"),
         m("glm-5.2", "glm", "GLM 5.2"),
@@ -1331,6 +1332,15 @@ pub fn resolve_model_selection(env: &ProviderEnv) -> Result<ModelSelection, Prov
             200_000,
             8_192,
         )),
+        // GLM 5.4 — newest GLM (verified live 2026-11-26: z.ai answers model
+        // "glm-5.4"; there is no 5.4 flash or air tier). Same base and limits as 5.3.
+        "glm-5.4" | "glm-5-4" => Ok(model_selection(
+            ProviderId::Glm,
+            "glm-5.4",
+            glm_base_url(env),
+            1_000_000,
+            128_000,
+        )),
         "glm-5.3" | "glm-5-3" => Ok(model_selection(
             ProviderId::Glm,
             "glm-5.3",
@@ -1482,7 +1492,7 @@ fn model_for_explicit_provider(
         "claude-opus-5-5" | "claude-sonnet-5-5" | "claude-fable-5-1" | "claude-code-fable-5-1" => {
             (1_000_000, 128_000)
         }
-        "glm-5.3" | "glm-5.3-flash" => (1_000_000, 128_000),
+        "glm-5.4" | "glm-5.3" | "glm-5.3-flash" => (1_000_000, 128_000),
         "minimax-m3" | "minimax-m3.1-flash-preview" => (1_000_000, 8_192),
         "minimax-m2.7-highspeed" => (204_800, 8_192),
         "gemini-3.8-flash" | "gemini-3.5-flash-lite" | "gemini-3.1-pro-preview" => {
@@ -2625,6 +2635,7 @@ mod tests {
             "kimi-k3",
             "kimi-k2.6",
             "kimi-k2",
+            "glm-5.4",
             "glm-5.3",
             "glm-5.3-flash",
             "glm-5.2",
@@ -3383,5 +3394,40 @@ mod model_refresh_tests {
                 assert_eq!(selection.max_output_tokens, 128_000);
             }
         }
+    }
+    #[test]
+    fn glm54_resolves_on_both_paths_and_is_in_the_picker() {
+        let env = |vars: &[(&str, &str)]| ProviderEnv {
+            vars: vars
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+            ..Default::default()
+        };
+        for id in ["glm-5.4", "glm-5-4"] {
+            let sel = resolve_model_selection(&env(&[("OCEAN_MODEL", id)])).unwrap();
+            assert_eq!(sel.provider, ProviderId::Glm, "{id}");
+            assert_eq!(sel.model, "glm-5.4", "{id}");
+            assert_eq!(sel.base_url, GLM_BASE_URL);
+            assert_eq!(sel.context_window, 1_000_000);
+            assert_eq!(sel.max_output_tokens, 128_000);
+        }
+        let explicit = resolve_model_selection(&env(&[
+            ("OCEAN_MODEL", "glm-5.4"),
+            ("OCEAN_PROVIDER", "glm"),
+        ]))
+        .unwrap();
+        assert_eq!(explicit.model, "glm-5.4");
+        assert_eq!(explicit.context_window, 1_000_000);
+        assert_eq!(explicit.max_output_tokens, 128_000);
+        let listed = known_models()
+            .into_iter()
+            .find(|m| m.id == "glm-5.4")
+            .expect("glm-5.4 must be in the picker");
+        assert_eq!(listed.provider, "glm");
+        assert_eq!(listed.reasoning_efforts, ["low", "high", "max"]);
+        // The unversioned "glm" alias still means glm-5.3.
+        let default = resolve_model_selection(&env(&[("OCEAN_MODEL", "glm")])).unwrap();
+        assert_eq!(default.model, "glm-5.3");
     }
 }
